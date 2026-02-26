@@ -20,4 +20,4 @@
   - 对照 `train.py`/`utils/fast_utils.py`/`scene/gaussian_model.py`/CUDA rasterizer,确认 `densification_interval`、`loss_thresh`、`grad_abs_thresh`、`dense`、`highfeature_lr`、`lowfeature_lr`、`mult`、`optimizer_type`、`test_iterations` 的真实作用与相互关系.
 - 将参数说明落盘到 `docs/`:
   - 新增 `docs/fastgs-train-scripts.md`,作为 `train_base.sh`/`train_big.sh` 的参数速查与调参指南.
-- 准备将当前工作区改动提交并推送到 `https://github.com/raiscui/FastGS.git`,用于对外同步.
+- 已将当前工作区改动提交并推送到 `https://github.com/raiscui/FastGS.git`(remote: `raiscui`, branch: `main`).
