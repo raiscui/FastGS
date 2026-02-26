@@ -96,6 +96,22 @@ conda env create --file environment.yml
 conda activate fastgs
 ```
 
+We also provide a **Pixi** workspace (`pixi.toml`) for a reproducible, one-command setup:
+
+```bash
+# Create/install the environment from the lockfile
+pixi install --frozen
+
+# Build & install local CUDA extensions (editable)
+pixi run setup
+```
+
+Then you can run scripts via Pixi, for example:
+
+```bash
+pixi run python train.py -s ./datasets/mipnerf360/bicycle -i images --eval
+```
+
 ### 📂 Dataset Organization
 
 Organize your datasets in the following structure:

@@ -1,0 +1,37 @@
+[workspace]
+authors = ["Codex <codex@local>"]
+channels = ["https://prefix.dev/conda-forge"]
+channel-priority = "strict"
+name = "FastGS"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+# 这些本地 CUDA 扩展在 setup.py 里会 import torch,因此需要禁用 pip 的 build isolation,
+# 让它直接复用 pixi/conda 环境里的 torch.
+setup = "python -m pip install --no-build-isolation -e submodules/diff-gaussian-rasterization_fastgs -e submodules/simple-knn -e submodules/fused-ssim"
+train = "python train.py"
+render = "python render.py"
+metrics = "python metrics.py"
+
+[dependencies]
+python = "3.13.*"
+pip = "*"
+plyfile = "*"
+tqdm = "*"
+websockets = "*"
+
+[feature.cuda.dependencies]
+# CUDA 环境: 用于训练/渲染. 约束在 CUDA 12.x,避免解析到 CUDA 13.x 的新栈.
+cuda-version = "12.9.*"
+pytorch-gpu = "2.9.1.*"
+torchvision = "0.24.1.*"
+torchaudio = "2.9.1.*"
+
+[feature.cuda.system-requirements]
+# 声明本机具备 CUDA 12.x 驱动/运行时能力,用于触发 conda-forge 选择 CUDA 构建.
+cuda = "12"
+
+[environments]
+# 默认安装 CUDA 环境(符合本项目的主要使用方式).
+default = ["cuda"]
