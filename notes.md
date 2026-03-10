@@ -122,3 +122,185 @@
 
 ## 交付物
 - 2026-02-26 02:17 UTC: 已将本次答疑整理为文档 `docs/fastgs-train-scripts.md`,后续如果要同步 README,可直接从该文档抽取段落.
+
+---
+
+# 笔记: convert.py 支持整目录视频输入
+
+## 现象
+- 当前  仅支持从  读取图片,不支持直接读取视频文件.
+- 用户当前素材是同一镜头拍摄的多个短视频,希望把整个视频目录视为同一套输入直接处理.
+
+## 当前假设
+- 主假设: 最稳的改造方式是增加一个视频目录参数,先自动抽帧到 ,再沿用现有 COLMAP 流程.
+- 备选解释: 也可以允许  直接就是视频目录,再内部临时生成工作目录. 但这种方式会让现有  语义变得模糊,也更容易破坏原行为.
+- 推翻主假设的证据: 如果现有脚本在  上有强依赖,且自动生成抽帧目录会和已有数据互相覆盖导致难以安全区分,则需要改为独立视频工作区.
+
+## 静态证据
+-  的 COLMAP 命令全部硬编码使用  作为原始图像目录.
+- 训练加载侧读取的是 undistort 后的  和 .
+- 因此,视频模式只要最终产出同样的  结构,训练侧无需改动.
+
+
+## 验证结果 (2026-03-10 04:10:59 UTC)
+- 静态验证:
+  - `python3 -m py_compile convert.py` 通过.
+  - `python3 convert.py --help` 正常显示新增参数: `--video_path`、`--video_fps`、`--ffmpeg_executable`、`--overwrite`.
+- 动态验证:
+  - 使用 fake `ffmpeg` + fake `colmap` 执行 `python3 convert.py -s <video_scene>`.
+  - 结果确认生成 `input/` 抽帧文件,并最终产出 `images/` 与 `sparse/0/cameras.bin|images.bin|points3D.bin`.
+  - 同时验证了旧图片模式 `python3 convert.py -s <image_scene>` 仍可走通.
+- 结论:
+  - 当前主假设成立: “自动抽帧到 `input/`,再复用原 COLMAP 流程”可以同时满足新视频需求和旧图片兼容性.
+
+
+## 真实目录验证 (2026-03-10 05:41:24 UTC)
+- 验证命令:
+  - `convert.discover_video_files(Path('/workspace/lyra/outputs/flashvsr_reference/full_scale2x'))`
+- 关键输出:
+  - `MODE rgb_recursive`
+  - `COUNT 6`
+  - 命中的路径均为 `/workspace/lyra/outputs/flashvsr_reference/full_scale2x/<0..5>/rgb/00172.mp4`
+- 结论:
+  - 对这批素材, `convert.py` 不需要你手动搬运视频.
+  - 直接对 `full_scale2x` 根目录执行 `python3 convert.py -s /workspace/lyra/outputs/flashvsr_reference/full_scale2x` 即可进入递归 `rgb` 视频模式.
+  - 首次跑完后如果想重新抽帧,需要显式加 `--overwrite`,否则脚本会优先复用已生成的 `input/`.
+
+
+## 真实 convert 执行结论 (2026-03-10 06:02:57 UTC)
+- 执行命令:
+  - `python3 convert.py -s /workspace/lyra/outputs/flashvsr_reference/full_scale2x --video_fps 2 --no_gpu`
+- 关键输出:
+  - `Discovered 6 video(s) ... using rgb_recursive mode`
+  - `Extracted 60 frames into .../input`
+  - `Loading matches... 1770`
+  - `Loading images... 60 in ... (connected 60)`
+  - `Reconstruction with 60 images and 21007 points`
+- 产物核查:
+  - `input/`: 60 张 jpg
+  - `images/`: 60 张 undistorted 图
+  - `sparse/0/`: `cameras.bin`、`images.bin`、`points3D.bin`
+- 环境结论:
+  - `apt` 安装的 `colmap` 在这台机器上显示 `without CUDA`,因此本机跑 `convert.py` 时应显式加 `--no_gpu`.
+  - `ffmpeg` 路径为 `/usr/local/ffmpeg/bin/ffmpeg`.
+
+---
+
+# 笔记: full_scale2x 的 100 iter 烟雾训练与抽帧参数核查
+
+## 现象
+- 上一轮 smoke test 启动时, `-m` 参数没有正确传入, 终端里输出目录回退为 `./output/032e12b6-bfff-411f-a6c6-088cda08ac69`.
+- 需要确认这是否导致训练失败, 以及真实数据链路是否已经跑通.
+- 用户还追问了 `--video_fps 2` 的具体抽帧方式.
+
+## 假设
+- 主假设: 训练本身已经正常完成, 只是输出目录没有落到原计划的自定义路径.
+- 备选解释: 训练可能只完成了数据读取阶段, 或在后台中途失败, 需要重新跑.
+- 推翻主假设的证据: 如果会话没有出现 `Training complete.` 或输出目录缺少 `point_cloud/iteration_100/point_cloud.ply`, 则说明仍需重跑.
+
+## 验证
+- 会话回读:
+  - `write_stdin(session_id=34025)` 返回完整训练日志.
+  - 关键输出包括:
+    - `Output folder: ./output/032e12b6-bfff-411f-a6c6-088cda08ac69`
+    - `Number of points at initialisation : 21007`
+    - `[ITER 100] Saving Gaussians`
+    - `Training complete.`
+- 产物核查:
+  - 输出目录存在 `cameras.json`、`cfg_args`、`input.ply`、`point_cloud/iteration_100/point_cloud.ply`.
+  - `point_cloud.ply` 大小约 `5211266` 字节, header 显示 `element vertex 21007`.
+- `--video_fps 2` 核查:
+  - 6 个源视频都位于 `/workspace/lyra/outputs/flashvsr_reference/full_scale2x/<0..5>/rgb/00172.mp4`.
+  - `ffprobe` 显示每段视频参数一致:
+    - 时长 `5.039567` 秒
+    - 原始帧率 `2401/100 ≈ 24.01 fps`
+    - 原始总帧数 `121`
+  - 抽帧结果统计:
+    - 每段视频各生成 `10` 张 jpg
+    - 总计 `60` 张
+
+## 结论
+- 主假设成立: 100 iter 烟雾训练已经真实完成, 不需要为“训练是否能跑通”这件事再次重跑.
+- 这次 smoke test 已证明 FastGS 可以直接读取刚生成的 `images/` 与 `sparse/0/` 进入训练.
+- `--video_fps 2` 的含义就是“每秒抽 2 帧”. 对这批 5.04 秒视频来说, 理论值约 `5.04 x 2 = 10.08`, 实际每段落盘 10 张, 所以 6 段一共 60 张.
+- 训练日志还暴露出一个重要默认行为: 输入图像宽度超过 1600 像素时, FastGS 会自动缩到 1.6K 宽. 如果后续想保留原始宽度, 需要显式传 `--resolution 1`.
+
+---
+
+# 笔记: full_scale2x 在 `--resolution 1` 下的正式训练结果
+
+## 现象
+- 用户选择了保留原始分辨率的正式训练方案.
+- 需要确认 `--resolution 1` 不只是参数写上了, 而是真的没有再触发训练侧的 1.6K 自动缩图.
+- 还需要确认完整 30000 iter 训练是否能在当前硬件上无错误跑完.
+
+## 假设
+- 主假设: 在当前 A800 80GB 环境下, 这套 60 视角数据可以直接用 `--resolution 1` 完整跑完 30000 iter.
+- 备选解释: 训练虽然能启动, 但可能在 densify 后段因为显存或点数增长而失败.
+- 推翻主假设的证据: 若日志在中后段出现 OOM、CUDA error, 或最终没有 `Training complete.` 和 `iteration_30000/point_cloud.ply`, 则主假设不成立.
+
+## 验证
+- 启动命令:
+  - `pixi run python train.py -s /workspace/lyra/outputs/flashvsr_reference/full_scale2x -m /workspace/FastGS/output/full_scale2x_res1_20260310_063357 --resolution 1`
+- 静态证据:
+  - `cfg_args` 明确记录: `resolution=1`
+  - 输出目录存在 `cfg_args`、`cameras.json`、`input.ply`、`train.log`
+- 动态证据:
+  - 日志包含:
+    - `Number of points at initialisation :  21007`
+    - `[ITER 30000] Saving Gaussians`
+    - `Gaussian number: 154271`
+    - `Training time: 332.24425458101723`
+    - `Training complete.`
+  - 训练日志中没有再出现 smoke test 时那条 `rescaling to 1.6K` 提示.
+- 产物核查:
+  - `/workspace/FastGS/output/full_scale2x_res1_20260310_063357/point_cloud/iteration_30000/point_cloud.ply`
+  - 文件大小约 `38260739` 字节.
+
+## 结论
+- 主假设成立: 这套 `full_scale2x` 数据在当前机器上可以用 `--resolution 1` 完整跑完正式训练.
+- 最终训练耗时约 `5 分 32 秒`, 输出目录为 `/workspace/FastGS/output/full_scale2x_res1_20260310_063357`.
+- 与前面的 100 iter smoke test 相比, Gaussian 数量从初始化 `21007` 增长到了最终 `154271`.
+- 对这批数据来说, `--resolution 1` 不仅可用, 而且训练时长也在可接受范围内.
+
+---
+
+# 笔记: full_scale2x 正式训练结果的 PSNR 评估
+
+## 现象
+- 用户追问正式训练结果的 PSNR.
+- 先按仓库标准路径执行 `render.py --skip_train`, 结果日志显示 `[test] Rendered 0 frames`.
+- 这说明当前模型目录里没有可评估的 test 视角.
+
+## 假设
+- 主假设: test 集为空, 是因为这轮训练和渲染都继承了 `cfg_args` 中的 `eval=False`.
+- 备选解释: 也可能是 test 渲染输出写入失败, 导致看起来像 0 帧.
+- 推翻主假设的证据: 如果代码里 `eval=False` 仍会构造 test 集, 或 test 目录里其实已经有有效的 gt/renders 文件, 那就不是切分问题.
+
+## 验证
+- 静态证据:
+  - `cfg_args` 显示 `eval=False`.
+  - `scene/dataset_readers.py` 中 `readColmapSceneInfo(...)` 的逻辑是:
+    - `if eval: ... test_cam_infos = [idx % llffhold == 0]`
+    - `else: train_cam_infos = cam_infos; test_cam_infos = []`
+  - `metrics.py` 只读取 `<model>/test/<method>/...`, 不会自动评估 train.
+- 动态证据:
+  - `render.py -m /workspace/FastGS/output/full_scale2x_res1_20260310_063357 --iteration 30000 --skip_train`
+    的结果是 `[test] Rendered 0 frames`.
+  - 随后执行
+    `render.py -m /workspace/FastGS/output/full_scale2x_res1_20260310_063357 --iteration 30000 --skip_test`
+    成功渲染 train 视角 60 帧.
+- 指标计算:
+  - 用仓库 `utils.image_utils.psnr` 与 `utils.loss_utils.ssim` 对
+    `train/ours_30000/renders` 和 `train/ours_30000/gt` 做逐帧均值统计.
+  - 结果:
+    - `count = 60`
+    - `PSNR = 26.686299165089924`
+    - `SSIM = 0.8608855307102203`
+
+## 结论
+- 主假设成立: 当前这轮正式训练没有 test 集, 所以严格意义上的 test PSNR 现在拿不到.
+- 当前能给出的真实数值是 train 集重建指标:
+  - `PSNR = 26.6863`
+  - `SSIM = 0.8609`
+- 如果后续要拿标准 test PSNR, 需要在训练和渲染时使用 `--eval`, 让 COLMAP 视角按 `llffhold=8` 切出 test 集.
