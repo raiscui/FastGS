@@ -88,3 +88,88 @@
 
 ### 验证
 - 改用精简脚本后, 已成功输出 `count=60`, `PSNR=26.6863`, `SSIM=0.8609`.
+
+## [2026-03-11 06:50:50 UTC] 错误名称: 用“相机目录软链接”喂给 COLMAP,导致数据库始终是 0 图 0 match
+
+### 问题现象
+- 用户按旧文档先把:
+  - `data/s01_colmap/images/C01pick -> data/s01/C01pick`
+  - `data/s01_colmap/images/C02pick -> data/s01/C02pick`
+  - ...
+  这种“目录级软链接”喂给 COLMAP.
+- 随后 `mapper` 报错:
+  - `No images with matches found in the database`
+- 继续核查数据库发现:
+  - `cameras = 0`
+  - `images = 0`
+  - `keypoints = 0`
+  - `matches = 0`
+  - `two_view_geometries = 0`
+
+### 原因
+- 问题不在 `mapper`,而在更早的 `feature_extractor`.
+- 已通过最小对照实验验证:
+  - 目录软链接 -> 数据库仍为 0
+  - 真实目录 + 文件复制 -> 正常入库
+  - 真实目录 + 文件软链接 -> 正常入库
+- 也就是说,当前这条 COLMAP 流程不会按预期读取“目录软链接”里的图片.
+
+### 修复
+- 新增 `scripts/run_s01_fastgs.sh`.
+- 脚本改为:
+  - 创建真实相机目录
+  - 在目录里逐张建立“文件级软链接”
+  - `feature_extractor` 后立即检查数据库中的 `images` / `cameras`
+  - `exhaustive_matcher` 后立即检查 `two_view_geometries`
+- 同步修正文档 `docs/s01_3dgs_workflow.md`, 移除旧的“目录软链接”写法.
+
+### 验证
+- 真实 smoke test 命令:
+  - `bash scripts/run_s01_fastgs.sh --overwrite --frame-limit 1 --iterations 10 --colmap-root data/s01_colmap_script_smoke --fastgs-root data/s01_fastgs_script_smoke --model-path output/s01_script_smoke`
+- 关键输出:
+  - `feature_extractor 完成: cameras=6, images=6`
+  - `exhaustive_matcher 完成: two_view_geometries=15`
+  - `Reconstruction with 6 images and 2389 points`
+  - `Training complete.`
+- 关键产物:
+  - `data/s01_fastgs_script_smoke/sparse/0/points3D.ply`
+  - `output/s01_script_smoke/point_cloud/iteration_10/point_cloud.ply`
+
+## [2026-03-11 08:09:36 UTC] 错误名称: `data/s01` 使用 `PINHOLE` 重建时空间被明显压扁
+
+### 问题现象
+- 用户执行 `bash scripts/run_s01_fastgs.sh --overwrite` 后, 观察到训练结果“高度像正常的一半”, 空间有明显被压扁的感觉.
+- 旧结果里 `output/s01/cameras.json` / `data/s01_colmap/sparse/0/cameras.bin` 出现异常内参:
+  - `fx≈3231`
+  - `fy≈8162`
+- `data/s01_colmap/sparse/0/points3D.bin` 的包围盒约为 `[76.37, 5.82, 46.02]`, 说明异常在 COLMAP 阶段就已经形成.
+
+### 原因
+- 不是 FastGS 训练参数单独导致的.
+- 已通过 full data 对照实验验证:
+  - `PINHOLE` 会把这批无畸变渲染图拟合成异常的双焦距比例
+  - `SIMPLE_PINHOLE` 则能保持更稳定的内参, 同时得到更厚实的 `y` 方向几何
+- 因此根因是 `data/s01` 当前默认使用 `PINHOLE` 作为 COLMAP 相机模型, 对这批数据过于自由.
+
+### 修复
+- 将 `scripts/run_s01_fastgs.sh` 的默认相机模型改为 `SIMPLE_PINHOLE`.
+- 新增 `--camera-model <SIMPLE_PINHOLE|PINHOLE>` 开关, 允许按数据情况覆盖.
+- 同步更新 `docs/s01_3dgs_workflow.md`, 把手动命令与排障说明改为 `SIMPLE_PINHOLE` 口径.
+
+### 验证
+- full data 对照:
+  - `PINHOLE`
+    - `points=80107`
+    - `Mean reprojection error=0.595019px`
+    - `spans=[76.367331, 5.817529, 46.023958]`
+  - `SIMPLE_PINHOLE`
+    - `points=86581`
+    - `Mean reprojection error=0.573127px`
+    - `spans=[76.727743, 16.558864, 59.953666]`
+- 新版脚本 smoke test:
+  - `bash scripts/run_s01_fastgs.sh --overwrite --frame-limit 1 --iterations 10 --colmap-root data/s01_colmap_simple_smoke_verify --fastgs-root data/s01_fastgs_simple_smoke_verify --model-path output/s01_simple_smoke_verify`
+  - 关键输出:
+    - `feature_extractor 完成: cameras=6, images=6`
+    - `exhaustive_matcher 完成: two_view_geometries=15`
+    - `Reconstruction with 6 images and 1974 points`
+    - `Training complete.`

@@ -113,6 +113,12 @@ Then you can run scripts via Pixi, for example:
 pixi run python train.py -s ./datasets/mipnerf360/bicycle -i images --eval
 ```
 
+If you need a CUDA-enabled `colmap` without replacing the system package, see `docs/colmap_cuda_build.md` for a verified `/workspace` build path and `convert.py --colmap_executable` usage.
+
+If you want a copy-paste workflow for the current multi-camera rendered sample `data/s01`, see `docs/s01_3dgs_workflow.md`.
+
+If you want a tested one-click entry for `data/s01`, run `bash scripts/run_s01_fastgs.sh`.
+
 ### 📂 Dataset Organization
 
 Organize your datasets in the following structure:

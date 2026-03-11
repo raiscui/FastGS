@@ -304,3 +304,370 @@
   - `PSNR = 26.6863`
   - `SSIM = 0.8609`
 - 如果后续要拿标准 test PSNR, 需要在训练和渲染时使用 `--eval`, 让 COLMAP 视角按 `llffhold=8` 切出 test 集.
+
+---
+
+# 笔记: 本机 SSH 密码登录状态核查
+
+## 来源
+
+### 来源1: `sshd -T`
+- 命令:
+  - `sshd -T | rg -i "^(port|permitrootlogin|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|usepam) "`
+- 结果:
+  - `port 23`
+  - `permitrootlogin yes`
+  - `passwordauthentication yes`
+  - `pubkeyauthentication yes`
+  - `kbdinteractiveauthentication no`
+  - `usepam yes`
+
+### 来源2: `/etc/ssh/sshd_config`
+- 关键配置:
+  - `Include /etc/ssh/sshd_config.d/*.conf`
+  - `Port 23`
+  - `PermitRootLogin yes`
+  - `PasswordAuthentication yes`
+  - `KbdInteractiveAuthentication no`
+  - `UsePAM yes`
+- `sshd_config.d` 目录当前没有额外 `.conf` 文件覆盖主配置.
+
+### 来源3: 运行态证据
+- 命令:
+  - `pgrep -af "^sshd:"`
+  - `lsof -nP -iTCP -sTCP:LISTEN | rg ":(22|23)\\b"`
+- 结果:
+  - 存在 `sshd` 监听进程.
+  - 当前监听端口是 `*:23`,不是默认的 `22`.
+
+## 综合发现
+- 现象:
+  - 本机 `sshd` 有效配置明确允许密码登录.
+  - 本机还明确允许 `root` 直接 SSH 登录.
+  - SSH 服务监听在 `23` 端口.
+- 结论:
+  - 若你用的是这台机器上的账户密码,当前配置允许通过 SSH 密码方式登录.
+  - 连接时端口应优先使用 `23`,不能想当然用默认 `22`.
+
+# 笔记: GPU 版 COLMAP 可行性核查
+
+## 来源
+
+### 来源1: 本机 `colmap -h`
+- 证据:
+  - `/usr/bin/colmap`
+  - 输出含 `COLMAP 3.7 ... without CUDA`
+- 要点:
+  - 当前系统安装的是 CPU 版 `colmap`.
+  - 这会导致 `convert.py` 即使默认请求 GPU, 实际也无法走 CUDA SIFT.
+
+### 来源2: `convert.py`
+- 位置:
+  - `convert.py:323`
+  - `convert.py:355`
+  - `convert.py:367`
+- 要点:
+  - `use_gpu = 0 if args.no_gpu else 1`
+  - 未传 `--no_gpu` 时,脚本本来就会把 `SiftExtraction.use_gpu=1` 与 `SiftMatching.use_gpu=1` 传给 COLMAP.
+  - 因此脚本层面并不存在“完全不支持 GPU”的问题.
+
+## 当前综合发现
+- 当前现象:
+  - 脚本里已经有 GPU 开关.
+  - 本机 `colmap` 是 `without CUDA`.
+- 当前主假设:
+  - 若替换为 CUDA 版 `colmap`, 现有 `convert.py` 大概率无需改动就能使用 GPU.
+- 最强备选解释:
+  - 即便替换为 CUDA 版 `colmap`, 仍可能因为本机 CUDA toolkit / 驱动 / CMake / 依赖版本不匹配而无法成功运行.
+- 下一步证据:
+  - 核查 `nvidia-smi`、`nvcc --version`、`cmake --version`、`g++ --version`.
+
+## 补充笔记: 准备在 /workspace 编译 CUDA 版 COLMAP
+
+### 官方构建线索
+- Context7 / 官方文档指出:
+  - Linux 默认仓库里的 `colmap` 通常不带 CUDA.
+  - `CUDA_ENABLED` 在 CMake 中默认是 `ON`, 但前提是构建时能找到 CUDA.
+  - Debian / Ubuntu 需要先准备一批系统依赖, 再执行标准的 `cmake -> build -> install` 流程.
+
+### 当前判断
+- 代码层已经允许通过 `--colmap_executable` 使用另一份 `colmap`.
+- 因此本次重点是把一份 CUDA 版编译到 `/workspace`, 而不是改仓库代码.
+
+## 补充笔记: CUDA 版 COLMAP 源码与安装目录约定
+- 为避免覆盖或删除旧目录, 本次使用带版本号的独立路径:
+  - 源码: `/workspace/colmap-cuda-src-3.12.6`
+  - 构建: `/workspace/colmap-cuda-build-3.12.6`
+  - 安装: `/workspace/colmap-cuda-install-3.12.6`
+- 这样后续如果要升级版本, 可以并行保留多份构建结果.
+
+## 补充笔记: CUDA 版 COLMAP 的验证策略
+- 静态验证:
+  - 新二进制 `-h` 输出应包含 `with CUDA`.
+  - `ldd` 应能看到 `libcudart.so` 等 CUDA 相关链接.
+- 动态验证:
+  - 用 2 张真实图片跑一次 `feature_extractor --SiftExtraction.use_gpu 1`.
+  - 只要数据库成功写出, 且命令不报 `without CUDA` / GPU 初始化失败, 就说明最关键的 GPU SIFT 路径已通.
+
+## 补充笔记: GPU 版 COLMAP 文档的落盘范围
+- 当前仓库 `docs/` 下只有 `docs/fastgs-train-scripts.md`.
+- README 里暂时没有 GPU 版 COLMAP 的专门入口.
+- 本次最小且清晰的落地方式:
+  - 新增 `docs/colmap_cuda_build.md`
+  - 视 README 中现有结构, 再决定是否补一个轻量链接入口.
+
+# 笔记: `data/s01` 的 3DGS 文档口径整理
+
+## 来源
+
+### 来源1: 仓库数据入口代码
+- 位置:
+  - `scene/__init__.py`
+  - `scene/dataset_readers.py`
+- 要点:
+  - 训练入口只识别带 `sparse/` 的 COLMAP 数据,或带 `transforms_train.json` 的 Blender 数据.
+  - COLMAP 路径下要求使用去畸变后的 `PINHOLE` / `SIMPLE_PINHOLE` 相机模型.
+
+### 来源2: `data/s01` 目录动态核对
+- 命令:
+  - `python3 - <<'PY' ...`
+- 结果:
+  - `C01pick` ~ `C06pick` 六个目录均存在.
+  - 每个目录当前各有 51 张 JPG.
+  - 样本图分辨率为 `3840x2160`.
+
+### 来源3: 当前用户约束
+- 用户确认:
+  - `s01` 是 3ds Max 渲染器渲染的图.
+  - 数据没有镜头畸变.
+  - 指定 GPU 版 COLMAP 路径:
+    - `/workspace/colmap-cuda-install-3.12.6/bin/colmap`
+  - 训练机器 GPU 为 A800 80G.
+
+## 综合发现
+- 当前结论:
+  - 文档主线应该是“手动 COLMAP CLI -> 生成 FastGS 可读目录 -> 训练”.
+  - 不应该把 `convert.py` 当成主推荐路径,因为它当前默认 `single_camera=1`,不适合多机位目录.
+- 命令层决策:
+  - 文档中统一定义:
+    - `COLMAP_BIN=/workspace/colmap-cuda-install-3.12.6/bin/colmap`
+  - 相机模型使用:
+    - `--ImageReader.camera_model PINHOLE`
+  - 多机位目录使用:
+    - `--ImageReader.single_camera_per_folder 1`
+  - 训练推荐:
+    - A800 80G 优先推荐 `-r 2`
+    - 先给 `--iterations 1000` 的 smoke test
+    - 再给正式训练命令
+
+# 笔记: `mapper` 报 “No images with matches found” 的最小验证
+
+## 来源
+
+### 来源1: 用户真实失败现场
+- 现象:
+  - `mapper` 日志显示:
+    - `Loading cameras... 0`
+    - `Loading matches... 0`
+    - `Loading images... 0`
+    - `No images with matches found in the database`
+- 数据库动态核对:
+  - `cameras = 0`
+  - `images = 0`
+  - `keypoints = 0`
+  - `matches = 0`
+  - `two_view_geometries = 0`
+
+### 来源2: 最小对照实验
+- 测试数据:
+  - 取 `C01pick` 中 2 张真实图片
+- 三组输入形态:
+  - A. `images/C01pick -> 原目录软链接`
+  - B. `images/C01pick/xxx.jpg -> 真实复制文件`
+  - C. `images/C01pick/xxx.jpg -> 文件软链接`
+
+### 动态结果
+- A 目录软链接:
+  - `feature_extractor` 日志只出现 `Creating SIFT GPU feature extractor`
+  - 数据库计数:
+    - `cameras = 0`
+    - `images = 0`
+- B 真实目录 + 真实文件:
+  - 正常处理 2 张图
+  - 数据库计数:
+    - `cameras = 1`
+    - `images = 2`
+- C 真实目录 + 文件软链接:
+  - 正常处理 2 张图
+  - 数据库计数:
+    - `cameras = 1`
+    - `images = 2`
+
+## 结论
+- 已验证结论:
+  - 当前失败根因不是 `mapper` 本身.
+  - 真正的问题发生在更前面的 `feature_extractor`.
+  - COLMAP 当前不会按预期跟进“目录软链接”中的图片,导致数据库完全为空.
+- 可用修正:
+  - 使用真实目录
+  - 目录内放真实文件或文件级软链接
+
+
+---
+
+# 笔记: drjohnson 训练命令参数释义核对
+
+## 来源
+
+### 来源1: `arguments/__init__.py`
+- 默认值确认:
+  - `densification_interval=100`
+  - `loss_thresh=0.1`
+  - `grad_abs_thresh=0.0012`
+  - `highfeature_lr=0.005`
+  - `lowfeature_lr=0.0025`
+  - `dense=0.001`
+  - `mult=0.5`
+  - `optimizer_type="default"`
+
+### 来源2: `train.py`
+- `OAR_JOB_ID` 只用于在未显式传 `--model_path` 时决定输出目录名.
+- `--test_iterations` 虽然被解析,但训练循环里的 `training_report(...)` 调用当前被注释,因此训练中不会真正触发评估.
+- `densification_interval` 在 `iteration > densify_from_iter` 且整除时触发多视角 densify + prune.
+- `optimizer_type=default` 会走 `gaussians.optimizer_step(iteration)` 这条主路径.
+
+### 来源3: `scene/gaussian_model.py`
+- `lowfeature_lr` 作用在 `features_dc`.
+- `highfeature_lr` 作用在 `features_rest`,但真实 lr 是 `highfeature_lr / 20`.
+- `grad_abs_thresh` 控制 split 候选阈值.
+- `dense * extent` 是 clone / split 的尺寸分界.
+- `default` 优化器不是每轮都更新全部参数: 15k 前较频繁,后期逐步降频.
+
+### 来源4: `utils/fast_utils.py` + CUDA rasterizer
+- `loss_thresh` 用于构造高误差像素二值图 `metric_map = (l1_loss_norm > args.loss_thresh).int()`.
+- `mult` 同时参与训练渲染、重要性评分渲染和最终 `render.py` 渲染.
+- CUDA 中 `t = mult * t` 会直接改变 compact box 大小,因此 `mult` 会影响 tiles 覆盖范围与速度/稳健性平衡.
+
+### 来源5: `scene/dataset_readers.py`
+- `--eval` 对 COLMAP 数据会按 `llffhold=8` 切 train/test.
+- 不开 `--eval` 时,测试集为空.
+
+## 综合发现
+- 用户给出的 `drjohnson` 这一行来自 `train_base.sh`,属于比 `train_big.sh` 更保守的一套配置:
+  - `densification_interval=500`
+  - `grad_abs_thresh=0.0012`
+  - `dense=0.013`
+  - `mult=0.7`
+- 这套参数整体倾向:
+  - 比 big 配置更稳,更省点数/时间.
+  - 但 densify/split 没那么激进,极限细节通常不如 big 配置.
+- `mult` 对“最终结果”的影响不只在训练期,因为 render 阶段通常也要保持一致.
+- `test_iterations=30000` 在当前仓库状态下主要是配置记录作用,不是训练中评估开关.
+
+## 可直接给用户的结论
+- 这条命令里真正决定最终质量/点数/速度平衡的核心旋钮是:
+  - `densification_interval`
+  - `grad_abs_thresh`
+  - `dense`
+  - `highfeature_lr`
+  - `mult`
+- 其中:
+  - `densification_interval` 决定多久增点一次.
+  - `grad_abs_thresh` 决定 split 有多激进.
+  - `dense` 决定点大小到什么程度算“该 split 的大点”.
+  - `highfeature_lr` 决定高阶 SH 颜色细节学得多快.
+  - `mult` 决定 compact box 有多保守,会影响训练和渲染的覆盖范围.
+
+# 笔记: `data/s01` 空间被压扁问题的相机模型对照
+
+## 现象
+- 用户反馈: 执行 `bash scripts/run_s01_fastgs.sh --overwrite` 后, 训练结果看起来“高度像正常的一半”, 空间被压扁.
+- 现有 `PINHOLE` 结果中:
+  - `output/s01/cameras.json` 出现 `fx≈3231`, `fy≈8162`
+  - `data/s01_colmap/sparse/0/points3D.bin` 包围盒约为 `[76.37, 5.82, 46.02]`
+- 这说明异常在 COLMAP 阶段就已经存在, 不能直接归因到 FastGS 训练参数.
+
+## 主假设与备选解释
+- 主假设:
+  - 对这批无畸变渲染图, `PINHOLE` 自由度偏高, 导致 COLMAP 把 `fx/fy` 拟合到异常比例, 进而把 sparse 几何压扁.
+- 备选解释:
+  - 数据本身竖直视差偏弱, 即便换成 `SIMPLE_PINHOLE` 也不会明显改善.
+
+## 动态验证
+- full data 对照目录:
+  - `PINHOLE`: `/workspace/FastGS/data/s01_colmap/sparse/0`
+  - `SIMPLE_PINHOLE`: `/workspace/FastGS/data/s01_colmap_simple_test/sparse/0`
+- `PINHOLE` 结果:
+  - `cameras=6`
+  - `registered_images=301`
+  - `points=80107`
+  - `Mean reprojection error=0.595019px`
+  - 相机参数近似:
+    - `[3231.x, 8161.x, 1920, 1080]`
+  - 点云包围盒:
+    - `[76.367331, 5.817529, 46.023958]`
+  - 比例:
+    - `x/y = 13.127108`
+    - `z/y = 7.911255`
+- `SIMPLE_PINHOLE` 结果:
+  - `cameras=6`
+  - `registered_images=301`
+  - `points=86581`
+  - `Mean reprojection error=0.573127px`
+  - 相机参数近似:
+    - `[3231.x, 1920, 1080]`
+  - 点云包围盒:
+    - `[76.727743, 16.558864, 59.953666]`
+  - 比例:
+    - `x/y = 4.633636`
+    - `z/y = 3.620639`
+
+## 结论
+- 主假设成立.
+- `SIMPLE_PINHOLE` 相比 `PINHOLE`:
+  - 保持了同样的注册图像数量 `301`
+  - 点数更多: `86581 > 80107`
+  - 重投影误差更低: `0.573px < 0.595px`
+  - `y` 方向跨度扩大约 `2.85x`
+- 因此 `data/s01` 当前“空间被压扁”的主要问题, 已验证更接近 COLMAP 的相机模型选择, 不是 FastGS 训练阶段单独引入.
+
+## 落地修正
+- `scripts/run_s01_fastgs.sh`
+  - 默认 `CAMERA_MODEL` 改为 `SIMPLE_PINHOLE`
+  - 新增 `--camera-model <SIMPLE_PINHOLE|PINHOLE>`
+- `docs/s01_3dgs_workflow.md`
+  - 更新手动 COLMAP 命令为 `SIMPLE_PINHOLE`
+  - 补入对照实验结果和排障说明
+
+
+---
+
+# 笔记: `docs/fastgs-train-scripts.md` 默认值补齐
+
+## 来源
+
+### 来源1: `arguments/__init__.py`
+- 训练参数默认值确认:
+  - `densification_interval=100`
+  - `loss_thresh=0.1`
+  - `grad_thresh=0.0002`
+  - `grad_abs_thresh=0.0012`
+  - `highfeature_lr=0.005`
+  - `lowfeature_lr=0.0025`
+  - `dense=0.001`
+  - `mult=0.5`
+  - `optimizer_type="default"`
+  - `eval=False`
+
+### 来源2: `train.py` / `render.py`
+- `test_iterations` 默认值来自 `train.py`,为 `[30000]`.
+- `render.py` 的 `--mult` 默认值也是 `0.5`,需要和训练侧一起写清楚,避免误以为脚本里的 `0.7` 是全局默认.
+
+## 综合发现
+- 原文档已经解释了参数作用,但没有系统地区分“代码默认值”和“脚本覆写值”.
+- 最容易被误读的几个参数是:
+  - `densification_interval`
+  - `mult`
+  - `eval`
+  - `test_iterations`
+- 最稳的写法不是只在正文零散补默认值,而是先给一个“默认值速查”总表,再在每个参数小节里重复写一次默认值.

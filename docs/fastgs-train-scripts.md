@@ -32,7 +32,23 @@
 
 `train.py` -> `output/<run>/` -> `render.py` -> `output/<run>/` -> `metrics.py`
 
-注意: 训练过程中"边训边测"的逻辑目前没开启,见本文第 7 节.
+注意: 训练过程中"边训边测"的逻辑目前没开启,见本文第 8 节.
+
+补充:
+- 如果你现在是通过
+  [`scripts/run_s01_fastgs.sh`](/workspace/FastGS/scripts/run_s01_fastgs.sh)
+  跑 `data/s01`,
+  这份文档里最常用的一组训练参数已经可以直接在脚本里配置了。
+- 脚本当前已支持:
+  - `--densification_interval`
+  - `--loss_thresh`
+  - `--grad_thresh`
+  - `--grad_abs_thresh`
+  - `--highfeature_lr`
+  - `--lowfeature_lr`
+  - `--dense`
+  - `--mult`
+  - `--optimizer_type`
 
 ---
 
@@ -55,6 +71,10 @@ args.model_path = os.path.join("./output/", unique_str)
 - 你不传 `-m/--model_path` 时,会默认输出到 `./output/<OAR_JOB_ID>/`.
 - 这能保证脚本后半段的 `render.py -m output/<name>` 找得到对应训练结果.
 
+补一句默认行为:
+- `OAR_JOB_ID` 本身没有代码内置默认值.
+- 如果你既没传 `--model_path`,也没设置 `OAR_JOB_ID`,训练会退回到一个随机 UUID 目录.
+
 ---
 
 ## 4. Base vs Big 的关键差异
@@ -72,15 +92,55 @@ args.model_path = os.path.join("./output/", unique_str)
 
 ---
 
-## 5. 关键参数怎么影响训练? (按"作用域"分组)
+## 5. 当前代码默认值速查
+
+这一节专门回答一个很容易混淆的问题:
+- `train_base.sh` / `train_big.sh` 里的值,是"脚本覆写值".
+- 下面表里的值,才是"代码默认值".
+
+默认值来源:
+- 训练相关大多来自 `arguments/__init__.py`
+- `--test_iterations` 来自 `train.py`
+- `render.py` 的 `--mult` 也有自己的默认值
+
+| 参数 | 当前代码默认值 | 备注 |
+| --- | --- | --- |
+| `--eval` | `False` | 不传时不会切 test 集 |
+| `--densification_interval` | `100` | Base 常覆写到 `500` |
+| `--loss_thresh` | `0.1` | FastGS 多视角高误差像素阈值 |
+| `--grad_thresh` | `0.0002` | clone 阈值 |
+| `--grad_abs_thresh` | `0.0012` | split 阈值 |
+| `--lowfeature_lr` | `0.0025` | `features_dc` 学习率 |
+| `--highfeature_lr` | `0.005` | `features_rest` 入口值,真实会再除以 `20` |
+| `--dense` | `0.001` | clone / split 尺寸分界系数 |
+| `--mult` | `0.5` | 训练和 `render.py` 默认都是 `0.5` |
+| `--optimizer_type` | `default` | 当前脚本也都用这个 |
+| `--test_iterations` | `[30000]` | 当前训练循环里不会真正触发评估 |
+
+如果你只看脚本,很容易误以为例如:
+- `densification_interval` 默认就是 `500`
+- `mult` 默认就是 `0.7`
+
+其实不是.
+这些都只是某些数据集在脚本里的推荐覆写值.
+
+---
+
+## 6. 关键参数怎么影响训练? (按"作用域"分组)
 
 下面每个参数都给出:
+- 它在当前代码里的默认值.
 - 它在代码里的真实生效点.
 - 值变大/变小的直观影响.
 
-### 5.1 Densify/Prune 相关(最强耦合的一组)
+### 6.1 Densify/Prune 相关(最强耦合的一组)
 
-#### 5.1.1 `--densification_interval`
+#### 6.1.1 `--densification_interval`
+
+默认值:
+- 当前代码默认值是 `100`.
+- `train_base.sh` 常见覆写值是 `500`.
+- `train_big.sh` 常见覆写值是 `100`.
 
 生效点在 `train.py` 的训练循环里(原文摘录):
 
@@ -99,7 +159,11 @@ if iteration > opt.densify_from_iter and iteration % opt.densification_interval 
 - 画面糊,细节不够: 降低 `densification_interval`(更频繁 densify).
 - 训练太慢,点数暴涨: 提高 `densification_interval`.
 
-#### 5.1.2 `--loss_thresh`
+#### 6.1.2 `--loss_thresh`
+
+默认值:
+- 当前代码默认值是 `0.1`.
+- 只有少数脚本场景会显式覆写它,例如 `garden`.
 
 它用于生成"高误差像素"的二值图,来自 `utils/fast_utils.py`(原文摘录):
 
@@ -115,7 +179,12 @@ metric_map = (l1_loss_norm > args.loss_thresh).int()
 - 如果你发现模型总是"很吝啬",不怎么增点,可以适当降低 `loss_thresh`.
 - 如果你发现模型"太贪婪",早期就疯狂增点,可以提高 `loss_thresh`.
 
-#### 5.1.3 `--grad_thresh` 和 `--grad_abs_thresh`
+#### 6.1.3 `--grad_thresh` 和 `--grad_abs_thresh`
+
+默认值:
+- `grad_thresh` 默认值是 `0.0002`.
+- `grad_abs_thresh` 默认值是 `0.0012`.
+- 很多脚本只覆写 `grad_abs_thresh`,不会覆写 `grad_thresh`.
 
 这两个决定了 clone 与 split 的梯度门槛.
 
@@ -132,7 +201,11 @@ grad_qualifiers_abs = torch.where(torch.norm(grads_abs, dim=-1) >= args.grad_abs
 
 脚本里 Big 模式经常把 `grad_abs_thresh` 调小,就是为了让 split 更积极,细节更丰富.
 
-#### 5.1.4 `--dense`(强烈的"场景尺度相关"参数)
+#### 6.1.4 `--dense`(强烈的"场景尺度相关"参数)
+
+默认值:
+- 当前代码默认值是 `0.001`.
+- 脚本里常见覆写值大多明显高于默认值,例如 `0.003`、`0.005`、`0.01`、`0.013`.
 
 它决定某个 Gaussian 该走 clone 还是 split 的"尺寸分界".
 
@@ -152,9 +225,13 @@ split_qualifiers = torch.max(self.get_scaling, dim=1).values > args.dense*extent
 - `dense` 越小,更多点会被归类为"大点"(更容易 split),训练更激进.
 - `dense` 越大,更多点会走 clone,整体更保守.
 
-### 5.2 SH 特征学习率(主要影响颜色/高频细节拟合速度)
+### 6.2 SH 特征学习率(主要影响颜色/高频细节拟合速度)
 
-#### 5.2.1 `--lowfeature_lr`
+#### 6.2.1 `--lowfeature_lr`
+
+默认值:
+- 当前代码默认值是 `0.0025`.
+- 很多脚本不显式传它,因此经常直接沿用默认值.
 
 它用于 `features_dc`(低阶 SH/基色)的学习率,在 `scene/gaussian_model.py` 的参数组里:
 
@@ -162,7 +239,12 @@ split_qualifiers = torch.max(self.get_scaling, dim=1).values > args.dense*extent
 {'params': [self._features_dc], 'lr': training_args.lowfeature_lr, "name": "f_dc"},
 ```
 
-#### 5.2.2 `--highfeature_lr`
+#### 6.2.2 `--highfeature_lr`
+
+默认值:
+- 当前代码默认值是 `0.005`.
+- 但真实送进 `features_rest` 优化器前会先除以 `20`.
+- 所以默认实际学习率是 `0.00025`.
 
 它用于 `features_rest`(高阶 SH 系数)的学习率,但注意这里被除以了 20(原文摘录):
 
@@ -177,7 +259,12 @@ sh_l = [{'params': [self._features_rest], 'lr': training_args.highfeature_lr / 2
 - 提高特征学习率通常会更快拟合细节与颜色,但也更容易引入噪声与过拟合.
 - 不同数据集/场景的纹理复杂度差别很大,所以脚本按场景调整这两个值是合理的.
 
-### 5.3 `--mult`: compact box 的渲染/速度拨杆
+### 6.3 `--mult`: compact box 的渲染/速度拨杆
+
+默认值:
+- 训练侧当前代码默认值是 `0.5`.
+- `render.py` 的命令行默认值也是 `0.5`.
+- 但 Tanks&Temples / Deep Blending 脚本里常覆写成 `0.7`.
 
 这个参数会传入 CUDA rasterizer,用于 compact box 的 bbox/tiles 计算.
 
@@ -198,7 +285,11 @@ t = mult * t; // beta in Compact Box
 - 训练用的 `mult` 和 `render.py` 用的 `mult`,尽量保持一致.
   否则你可能得到"训练时的分布"和"评估时的分布"不一致的结果.
 
-### 5.4 `--optimizer_type`
+### 6.4 `--optimizer_type`
+
+默认值:
+- 当前代码默认值是 `default`.
+- 现有脚本也全部显式传了 `default`.
 
 这是优化器分支开关,在 `train.py` 里:
 - `default`: 走 `gaussians.optimizer_step(iteration)`(本仓库的主路径).
@@ -206,7 +297,12 @@ t = mult * t; // beta in Compact Box
 
 脚本里目前全是 `--optimizer_type default`.
 
-### 5.5 `--eval`
+### 6.5 `--eval`
+
+默认值:
+- 当前代码默认值是 `False`.
+- 也就是说,如果你自己直接跑 `train.py` 且没传 `--eval`,默认是没有 test 集的.
+- 两份官方脚本都显式传了 `--eval`.
 
 它影响数据集 train/test 切分.
 
@@ -216,7 +312,7 @@ t = mult * t; // beta in Compact Box
 
 ---
 
-## 6. 给新数据集的调参顺序(推荐)
+## 7. 给新数据集的调参顺序(推荐)
 
 如果你要跑一个"脚本里没有的场景",建议按下面顺序改.
 这样每一步的影响相对可控,不会一下子把系统推到不可解释的状态.
@@ -239,16 +335,24 @@ t = mult * t; // beta in Compact Box
 
 ---
 
-## 7. 一个容易踩的坑: `--test_iterations` 目前基本无效
+## 8. 一个容易踩的坑: `--test_iterations` 目前基本无效
+
+默认值:
+- `train.py` 里解析到的默认值是 `[30000]`.
+- 但这个默认值当前更多只是配置记录,不是实际会触发的训练中评估时机.
 
 `train.py` 里本来有 `training_report(...)` 用于在训练中做 test-set 评估.
 
 但当前训练循环里这行调用被注释掉了:
 - `train.py` 里能看到类似 `# training_report(...)` 的注释调用.
 
-所以脚本里写 `--test_iterations 30000` 的效果是:
+所以你如果手动在训练命令里写 `--test_iterations 30000` 的效果是:
 - 参数被解析了.
 - 但训练中不会触发评估输出.
+
+补充:
+- `scripts/run_s01_fastgs.sh` 当前已经刻意不暴露 `--test_iterations`.
+- 原因就是它在当前代码路径里基本不产生你直觉上期待的“训练中测试”效果.
 
 目前这套仓库的主评估路径是:
 - 训练结束后跑 `render.py`
