@@ -671,3 +671,31 @@
   - `eval`
   - `test_iterations`
 - 最稳的写法不是只在正文零散补默认值,而是先给一个“默认值速查”总表,再在每个参数小节里重复写一次默认值.
+
+# 笔记: 关于 `scripts/run_s01_fastgs.sh: line 479: syntax error near unexpected token )` 的复核
+
+## 现象
+- 用户反馈在训练完成后看到:
+  - `scripts/run_s01_fastgs.sh: line 479: syntax error near unexpected token ')'`
+
+## 当前假设
+- 主假设:
+  - 这条报错来自刚才运行时的旧版本脚本, 而不是当前工作区里的最新文件.
+- 备选解释:
+  - 脚本存在肉眼不明显的行尾/隐藏字符问题.
+
+## 验证
+- 读取当前 `scripts/run_s01_fastgs.sh` 的 470-490 行:
+  - 第 479 行当前是正常的 `;;`
+- 用 `cat -vet` 检查该段行尾:
+  - 未发现异常控制字符
+- 运行:
+  - `bash -n scripts/run_s01_fastgs.sh`
+  - 结果: 通过
+- 运行:
+  - `bash scripts/run_s01_fastgs.sh --help`
+  - 结果: 正常返回 `OK`
+
+## 结论
+- 当前工作区里的 `scripts/run_s01_fastgs.sh` 不存在该语法错误.
+- 这更像是用户刚才跑到的旧版本脚本报错, 当前版本已经是可解析的.
