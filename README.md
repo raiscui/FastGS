@@ -119,6 +119,54 @@ If you want a copy-paste workflow for the current multi-camera rendered sample `
 
 If you want a tested one-click entry for `data/s01`, run `bash scripts/run_s01_fastgs.sh`.
 
+If your source path is a Lyra-generated multi-view root like `view_id/{rgb,pose,intrinsics}/scene_stem.*`, `train.py` can now consume it directly without COLMAP. On first load FastGS will extract cached PNG frames under `.fastgs_cache/lyra_generated/`, reuse the saved `pose/intrinsics`, and generate a focus-centered initialization point cloud for the scene:
+
+```bash
+pixi run python train.py \
+  -s /workspace/lyra/assets/demo/static/diffusion_output_generated_my \
+  -m output/dj_style_fastgs \
+  --eval -r 2
+```
+
+Or use the one-click wrapper:
+
+```bash
+bash scripts/run_lyra_fastgs.sh
+```
+
+To evaluate an existing Lyra run in one command:
+
+```bash
+bash scripts/run_lyra_fastgs.sh \
+  --phase evaluate \
+  --model-path output/dj_style_fastgs \
+  --overwrite
+```
+
+If you want the traditional COLMAP route instead, and explicitly do not want to reuse Lyra's bundled `pose/intrinsics`, use:
+
+```bash
+bash scripts/run_lyra_colmap_fastgs.sh \
+  --phase all \
+  -r 1 \
+  --camera-model SIMPLE_PINHOLE \
+  --video-fps 24 \
+  --model-path output/lyra_colmap_r1_30000 \
+  --overwrite
+```
+
+This wrapper only reads `rgb/*.mp4`, then runs:
+
+- `convert.py`
+- `train.py`
+- `render.py`
+- `metrics.py`
+
+So it gives you a same-repo baseline for comparing:
+
+- Lyra direct camera parameters
+- COLMAP recovered camera parameters
+
 ### 📂 Dataset Organization
 
 Organize your datasets in the following structure:

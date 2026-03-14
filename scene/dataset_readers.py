@@ -9,16 +9,19 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import json
 import os
+import shutil
+import subprocess
 import sys
-from PIL import Image
+from pathlib import Path
 from typing import NamedTuple
+
+from PIL import Image
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
     read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
 from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
 import numpy as np
-import json
-from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
@@ -41,6 +44,23 @@ class SceneInfo(NamedTuple):
     test_cameras: list
     nerf_normalization: dict
     ply_path: str
+
+
+class LyraViewAsset(NamedTuple):
+    view_id: str
+    scene_stem: str
+    pose_path: Path
+    intrinsics_path: Path
+    rgb_path: Path
+
+
+LYRA_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm"}
+LYRA_CACHE_ROOT = ".fastgs_cache/lyra_generated"
+LYRA_POINT_CLOUD_METADATA_NAME = "points3d_metadata.json"
+LYRA_POINT_CLOUD_GENERATOR = "focus_center_v1"
+LYRA_POINT_CLOUD_EXTENT_RATIO = 0.25
+LYRA_POINT_CLOUD_MIN_EXTENT = 0.25
+LYRA_POINT_CLOUD_RANDOM_SEED = 0
 
 def getNerfppNorm(cam_info):
     def get_center_and_diag(cam_centers):
@@ -129,6 +149,373 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
+
+def generateRandomPointCloud(ply_path, num_pts=100_000, extent=1.3, center=None, seed=None):
+    # 统一保留“随机点云初始化”这一条主路径,避免 synthetic 与 direct loader 各自维护一套逻辑.
+    # 当调用方提供 center 时,点云会围绕该中心采样; 否则默认仍以原点为中心,兼容旧行为.
+    ply_path = Path(ply_path)
+    ply_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if center is None:
+        center = np.zeros(3, dtype=np.float32)
+    else:
+        center = np.asarray(center, dtype=np.float32)
+        if center.shape != (3,):
+            raise ValueError(f"Point cloud center must have shape [3], got {center.shape}")
+
+    if seed is None:
+        random_xyz = np.random.random((num_pts, 3))
+        random_shs = np.random.random((num_pts, 3))
+    else:
+        rng = np.random.default_rng(seed)
+        random_xyz = rng.random((num_pts, 3))
+        random_shs = rng.random((num_pts, 3))
+
+    xyz = random_xyz * (2.0 * extent) - extent
+    xyz = xyz.astype(np.float32) + center[None, :]
+    shs = random_shs.astype(np.float32) / 255.0
+    pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+    storePly(str(ply_path), xyz, SH2RGB(shs) * 255)
+    return pcd
+
+
+def _split_train_test_cameras(cam_infos, eval, llffhold=8):
+    if eval:
+        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
+        test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+    else:
+        train_cam_infos = cam_infos
+        test_cam_infos = []
+    return train_cam_infos, test_cam_infos
+
+
+def _load_npz_named_array(npz_path: Path, tensor_name: str):
+    with np.load(npz_path, allow_pickle=False) as payload:
+        if "data" not in payload or "inds" not in payload:
+            raise ValueError(f"{tensor_name} npz must contain `data` and `inds`: {npz_path}")
+        return np.asarray(payload["data"], dtype=np.float32), np.asarray(payload["inds"], dtype=np.int64)
+
+
+def _discover_lyra_view_dirs(root: Path):
+    view_dirs = []
+    for candidate in sorted(root.iterdir()):
+        if not candidate.is_dir():
+            continue
+        if (candidate / "pose").is_dir() and (candidate / "intrinsics").is_dir() and (candidate / "rgb").is_dir():
+            view_dirs.append(candidate)
+    return view_dirs
+
+
+def _build_stem_map(directory: Path, suffixes):
+    stem_map = {}
+    for candidate in sorted(directory.iterdir()):
+        if candidate.is_file() and candidate.suffix.lower() in suffixes:
+            stem_map[candidate.stem] = candidate
+    return stem_map
+
+
+def discoverLyraGeneratedAssets(root_path):
+    root = Path(root_path)
+    if not root.is_dir():
+        raise ValueError(f"Lyra generated root does not exist: {root}")
+
+    view_dirs = _discover_lyra_view_dirs(root)
+    if not view_dirs:
+        raise ValueError(f"No Lyra view directories were found under: {root}")
+
+    common_scene_stems = None
+    per_view_asset_maps = {}
+    for view_dir in view_dirs:
+        pose_map = _build_stem_map(view_dir / "pose", {".npz"})
+        intrinsics_map = _build_stem_map(view_dir / "intrinsics", {".npz"})
+        rgb_map = _build_stem_map(view_dir / "rgb", LYRA_VIDEO_EXTENSIONS)
+
+        shared_stems = set(pose_map.keys()) & set(intrinsics_map.keys()) & set(rgb_map.keys())
+        if not shared_stems:
+            raise RuntimeError(
+                f"View `{view_dir.name}` does not contain a common scene stem across pose/intrinsics/rgb."
+            )
+
+        per_view_asset_maps[view_dir.name] = (pose_map, intrinsics_map, rgb_map)
+        common_scene_stems = shared_stems if common_scene_stems is None else (common_scene_stems & shared_stems)
+
+    if not common_scene_stems:
+        raise RuntimeError(
+            f"No common scene stem exists across all Lyra views under `{root}`."
+        )
+
+    if len(common_scene_stems) != 1:
+        available_stems = ", ".join(sorted(common_scene_stems))
+        raise RuntimeError(
+            "Lyra generated root contains multiple shared scene stems. "
+            f"Please keep one scene per root for FastGS direct loading. Found: {available_stems}"
+        )
+
+    scene_stem = sorted(common_scene_stems)[0]
+    view_assets = []
+    for view_id in sorted(per_view_asset_maps.keys()):
+        pose_map, intrinsics_map, rgb_map = per_view_asset_maps[view_id]
+        view_assets.append(
+            LyraViewAsset(
+                view_id=view_id,
+                scene_stem=scene_stem,
+                pose_path=pose_map[scene_stem],
+                intrinsics_path=intrinsics_map[scene_stem],
+                rgb_path=rgb_map[scene_stem],
+            )
+        )
+
+    return scene_stem, view_assets
+
+
+def isLyraGeneratedSceneRoot(root_path):
+    try:
+        _, view_assets = discoverLyraGeneratedAssets(root_path)
+    except (ValueError, RuntimeError):
+        return False
+    return len(view_assets) > 0
+
+
+def _lyra_cache_dir(root: Path, scene_stem: str, view_id: str):
+    return root / LYRA_CACHE_ROOT / scene_stem / view_id
+
+
+def _lyra_cache_metadata(video_path: Path, expected_frame_count: int):
+    video_stat = video_path.stat()
+    return {
+        "source_path": str(video_path.resolve()),
+        "source_size": int(video_stat.st_size),
+        "source_mtime_ns": int(video_stat.st_mtime_ns),
+        "expected_frame_count": int(expected_frame_count),
+    }
+
+
+def _lyra_cache_is_valid(cache_dir: Path, video_path: Path, expected_frame_count: int):
+    metadata_path = cache_dir / "metadata.json"
+    if not metadata_path.is_file():
+        return False
+
+    try:
+        current_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    if current_metadata != _lyra_cache_metadata(video_path, expected_frame_count):
+        return False
+
+    return all((cache_dir / f"{frame_idx:05d}.png").is_file() for frame_idx in range(expected_frame_count))
+
+
+def _extract_lyra_video_frames(video_path: Path, cache_dir: Path, expected_frame_count: int):
+    ffmpeg_executable = shutil.which("ffmpeg")
+    if ffmpeg_executable is None:
+        raise RuntimeError(
+            "Direct Lyra loading requires `ffmpeg` to extract RGB frames, but `ffmpeg` was not found in PATH."
+        )
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for stale_png in cache_dir.glob("*.png"):
+        stale_png.unlink()
+
+    output_pattern = cache_dir / "%05d.png"
+    command = [
+        ffmpeg_executable,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(video_path),
+        "-start_number",
+        "0",
+        str(output_pattern),
+    ]
+
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"ffmpeg failed while extracting `{video_path}`: {exc.stderr.strip() or exc}"
+        ) from exc
+
+    extracted_frames = sorted(cache_dir.glob("*.png"))
+    if len(extracted_frames) != expected_frame_count:
+        raise RuntimeError(
+            f"Extracted frame cache for `{video_path}` is incomplete under `{cache_dir}`: "
+            f"expected {expected_frame_count}, got {len(extracted_frames)}."
+        )
+
+
+def _ensure_lyra_frame_cache(root: Path, scene_stem: str, view_asset: LyraViewAsset, expected_frame_count: int):
+    cache_dir = _lyra_cache_dir(root, scene_stem, view_asset.view_id)
+    if not _lyra_cache_is_valid(cache_dir, view_asset.rgb_path, expected_frame_count):
+        _extract_lyra_video_frames(view_asset.rgb_path, cache_dir, expected_frame_count)
+        metadata = _lyra_cache_metadata(view_asset.rgb_path, expected_frame_count)
+        (cache_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    return cache_dir
+
+
+def _recover_camera_center_and_forward(cam_info: CameraInfo):
+    # CameraInfo 内部存的是 FastGS 训练口径下的 R/T.
+    # 这里统一反推回 c2w, 这样 Lyra 初始化与训练读入使用的是同一份几何解释.
+    w2c = getWorld2View2(cam_info.R, cam_info.T)
+    c2w = np.linalg.inv(w2c)
+    center = np.asarray(c2w[:3, 3], dtype=np.float64)
+    forward = np.asarray(c2w[:3, 2], dtype=np.float64)
+    forward_norm = np.linalg.norm(forward)
+    if forward_norm <= 1e-8:
+        raise ValueError(f"Camera `{cam_info.image_name}` has an invalid forward direction.")
+    return center, forward / forward_norm
+
+
+def _estimate_focus_centered_point_cloud(cam_infos):
+    if not cam_infos:
+        raise ValueError("Lyra point cloud initialization requires at least one training camera.")
+
+    system = np.zeros((3, 3), dtype=np.float64)
+    rhs = np.zeros(3, dtype=np.float64)
+    camera_centers = []
+
+    for cam_info in cam_infos:
+        camera_center, forward = _recover_camera_center_and_forward(cam_info)
+        camera_centers.append(camera_center)
+
+        # 对每条视线构造垂直投影矩阵,累加后求“离所有视线都最近”的公共注视点.
+        # 正常情况下 solve 即可; 若几何退化导致矩阵奇异,再回退到 lstsq 保持 loader 可用.
+        projection = np.eye(3, dtype=np.float64) - np.outer(forward, forward)
+        system += projection
+        rhs += projection @ camera_center
+
+    try:
+        focus_center = np.linalg.solve(system, rhs)
+    except np.linalg.LinAlgError:
+        focus_center, _, _, _ = np.linalg.lstsq(system, rhs, rcond=None)
+
+    if not np.all(np.isfinite(focus_center)):
+        raise ValueError("Failed to estimate a finite shared focus point for Lyra cameras.")
+
+    camera_centers = np.asarray(camera_centers, dtype=np.float64)
+    focus_distances = np.linalg.norm(camera_centers - focus_center[None, :], axis=1)
+    finite_distances = focus_distances[np.isfinite(focus_distances)]
+    if finite_distances.size == 0:
+        raise ValueError("Failed to estimate camera-to-focus distances for Lyra point cloud initialization.")
+
+    extent = max(LYRA_POINT_CLOUD_MIN_EXTENT, float(np.median(finite_distances) * LYRA_POINT_CLOUD_EXTENT_RATIO))
+    return np.asarray(focus_center, dtype=np.float32), extent
+
+
+def _lyra_point_cloud_metadata(scene_stem: str, point_cloud_center, extent: float, num_pts: int):
+    rounded_center = [round(float(value), 8) for value in np.asarray(point_cloud_center, dtype=np.float64).tolist()]
+    return {
+        "generator": LYRA_POINT_CLOUD_GENERATOR,
+        "scene_stem": scene_stem,
+        "num_points": int(num_pts),
+        "center": rounded_center,
+        "extent": round(float(extent), 8),
+        "seed": LYRA_POINT_CLOUD_RANDOM_SEED,
+    }
+
+
+def _ensure_lyra_point_cloud(root: Path, scene_stem: str, cam_infos, num_pts=100_000):
+    scene_cache_dir = root / LYRA_CACHE_ROOT / scene_stem
+    ply_path = scene_cache_dir / "points3d.ply"
+    metadata_path = scene_cache_dir / LYRA_POINT_CLOUD_METADATA_NAME
+
+    point_cloud_center, point_cloud_extent = _estimate_focus_centered_point_cloud(cam_infos)
+    expected_metadata = _lyra_point_cloud_metadata(
+        scene_stem=scene_stem,
+        point_cloud_center=point_cloud_center,
+        extent=point_cloud_extent,
+        num_pts=num_pts,
+    )
+
+    cached_metadata = None
+    if metadata_path.is_file():
+        try:
+            cached_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached_metadata = None
+
+    if (not ply_path.is_file()) or (cached_metadata != expected_metadata):
+        # 旧版 direct loader 已经在这里生成过“围绕原点”的错误缓存.
+        # 现在用元数据做版本检查,确保升级后能自动重建到正确位置.
+        print(f"Generating focus-centered point cloud ({num_pts}) for Lyra generated scene `{scene_stem}`...")
+        generateRandomPointCloud(
+            ply_path=ply_path,
+            num_pts=num_pts,
+            extent=point_cloud_extent,
+            center=point_cloud_center,
+            seed=LYRA_POINT_CLOUD_RANDOM_SEED,
+        )
+        metadata_path.write_text(json.dumps(expected_metadata, indent=2), encoding="utf-8")
+
+    return ply_path
+
+
+def _build_lyra_camera_infos(root: Path, view_assets):
+    cam_infos = []
+
+    for view_asset in view_assets:
+        pose_data, pose_inds = _load_npz_named_array(view_asset.pose_path, "pose")
+        intrinsics_data, intrinsics_inds = _load_npz_named_array(view_asset.intrinsics_path, "intrinsics")
+
+        if pose_data.ndim != 3 or pose_data.shape[-2:] != (4, 4):
+            raise ValueError(f"pose data must have shape [T, 4, 4], got {pose_data.shape} from {view_asset.pose_path}")
+
+        if intrinsics_data.ndim != 2 or intrinsics_data.shape[-1] != 4:
+            raise ValueError(
+                f"intrinsics data must have shape [T, 4], got {intrinsics_data.shape} from {view_asset.intrinsics_path}"
+            )
+
+        if pose_data.shape[0] != intrinsics_data.shape[0]:
+            raise ValueError(
+                f"pose/intrinsics length mismatch for view `{view_asset.view_id}`: "
+                f"{pose_data.shape[0]} vs {intrinsics_data.shape[0]}"
+            )
+
+        if pose_inds.shape != intrinsics_inds.shape or not np.array_equal(pose_inds, intrinsics_inds):
+            raise ValueError(
+                f"pose/intrinsics frame indices mismatch for view `{view_asset.view_id}`."
+            )
+
+        expected_frame_count = int(np.max(pose_inds)) + 1 if pose_inds.size > 0 else 0
+        cache_dir = _ensure_lyra_frame_cache(root, view_asset.scene_stem, view_asset, expected_frame_count)
+
+        for pose_idx, frame_idx in enumerate(pose_inds.tolist()):
+            image_path = cache_dir / f"{int(frame_idx):05d}.png"
+            if not image_path.is_file():
+                raise FileNotFoundError(
+                    f"Cached frame is missing for view `{view_asset.view_id}`, frame `{frame_idx}`: {image_path}"
+                )
+
+            c2w = pose_data[pose_idx]
+            w2c = np.linalg.inv(c2w)
+            rotation = np.transpose(w2c[:3, :3])
+            translation = np.array(w2c[:3, 3])
+
+            fx, fy, cx, cy = intrinsics_data[pose_idx]
+            with Image.open(image_path) as image_file:
+                image = image_file.copy()
+            width, height = image.size
+
+            cam_infos.append(
+                CameraInfo(
+                    uid=len(cam_infos),
+                    R=rotation,
+                    T=translation,
+                    FovY=focal2fov(float(fy), height),
+                    FovX=focal2fov(float(fx), width),
+                    image=image,
+                    image_path=str(image_path),
+                    image_name=f"{view_asset.scene_stem}_v{view_asset.view_id}_f{int(frame_idx):05d}",
+                    width=width,
+                    height=height,
+                )
+            )
+
+    return cam_infos
+
 def readColmapSceneInfo(path, images, eval, llffhold=8):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
@@ -145,12 +532,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
     cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
-    if eval:
-        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
-        test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
-    else:
-        train_cam_infos = cam_infos
-        test_cam_infos = []
+    train_cam_infos, test_cam_infos = _split_train_test_cameras(cam_infos, eval, llffhold=llffhold)
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
@@ -232,16 +614,9 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
 
     ply_path = os.path.join(path, "points3d.ply")
     if not os.path.exists(ply_path):
-        # Since this data set has no colmap data, we start with random points
         num_pts = 100_000
         print(f"Generating random point cloud ({num_pts})...")
-        
-        # We create random points inside the bounds of the synthetic Blender scenes
-        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
-        shs = np.random.random((num_pts, 3)) / 255.0
-        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
-
-        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+        pcd = generateRandomPointCloud(ply_path=ply_path, num_pts=num_pts, extent=1.3)
     try:
         pcd = fetchPly(ply_path)
     except:
@@ -254,7 +629,34 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
                            ply_path=ply_path)
     return scene_info
 
+
+def readLyraGeneratedSceneInfo(path, eval, llffhold=8):
+    root = Path(path)
+    scene_stem, view_assets = discoverLyraGeneratedAssets(root)
+    cam_infos_unsorted = _build_lyra_camera_infos(root, view_assets)
+    cam_infos = sorted(cam_infos_unsorted.copy(), key=lambda x: x.image_name)
+
+    train_cam_infos, test_cam_infos = _split_train_test_cameras(cam_infos, eval, llffhold=llffhold)
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = _ensure_lyra_point_cloud(root, scene_stem, train_cam_infos, num_pts=100_000)
+
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(
+        point_cloud=pcd,
+        train_cameras=train_cam_infos,
+        test_cameras=test_cam_infos,
+        nerf_normalization=nerf_normalization,
+        ply_path=str(ply_path),
+    )
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    "LyraGenerated": readLyraGeneratedSceneInfo,
 }

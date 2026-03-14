@@ -139,6 +139,22 @@
 
 ## [2026-03-11 05:46:33 UTC] 任务名称: 判断本机是否可以支持 GPU 版 COLMAP
 
+## [2026-03-14 10:10:00 UTC] 任务名称: 排查 `run_lyra_fastgs.sh` 训练结束后的 `unexpected EOF`
+
+### 任务内容
+- 分析用户在训练日志结束后看到的 `scripts/run_lyra_fastgs.sh: line 473: unexpected EOF while looking for matching '"'`.
+- 区分训练本体是否成功, 以及 shell 脚本是否只是在收尾阶段出现语法错误.
+
+### 完成过程
+- 先回读六文件上下文, 确认近期这个仓库确实反复处理过 shell 引号类问题.
+- 对当前工作区脚本执行 `bash -n scripts/run_lyra_fastgs.sh`, 结果通过, 未复现语法错误.
+- 核对当前文件长度, 发现只有 451 行, 与用户报错中的 `line 473` 对不上.
+- 检查脚本结尾与文件编码, 未发现额外隐藏内容或损坏的行尾.
+
+### 总结感悟
+- 这次报错的性质已经能确认是 shell 未闭合双引号, 不是 FastGS 训练失败.
+- 当“报错行号”和“当前文件行数”对不上时, 最该优先怀疑的不是业务逻辑, 而是执行时脚本版本和当前工作区版本不一致.
+
 ### 任务内容
 - 核查 `convert.py` 是否需要改代码才能支持 GPU 版 `colmap`.
 - 核查当前机器的 GPU、CUDA 与编译环境是否具备落地条件.
@@ -333,6 +349,106 @@
 - 这类调参文档最容易误导人的地方,通常不是解释不够多,而是没有先把“默认值”和“推荐覆写值”拆开.
 - 对频繁被复制命令的训练脚本文档来说,先给默认值总表,再在正文里重复强调一次,能明显降低误读成本.
 
+## [2026-03-14 09:05:22 UTC] 任务名称: 为 Lyra generated root 落地可直接训练的 FastGS importer
+
+### 任务内容
+- 让 `train.py -s /workspace/lyra/assets/demo/static/diffusion_output_generated_my` 可以直接进入 FastGS 训练.
+- 正确复用 Lyra 已生成的 `pose/*.npz` 与 `intrinsics/*.npz`, 避免重新回退到 COLMAP.
+- 修复 direct loader 首轮 `cudaErrorInvalidConfiguration` 的初始化几何问题.
+
+### 完成过程
+- 先回读 `/workspace/lyra` 生成链路,确认:
+  - `pose/*.npz` 保存的是 `c2w`
+  - `intrinsics/*.npz` 保存的是 `[fx, fy, cx, cy]`
+  - `0..5` 是 6 条固定视角轨迹
+- 在 `scene/dataset_readers.py` / `scene/__init__.py` 中补上 direct loader:
+  - 识别 Lyra generated root
+  - 用 `ffmpeg` 抽帧并缓存到 `.fastgs_cache/lyra_generated/`
+  - 直接把 `pose/intrinsics` 转成 FastGS `CameraInfo`
+- 首轮训练失败后,按“现象 -> 假设 -> 最小验证 -> 结论”继续推进:
+  - 复现到失败相机 `dj-style_v4_f00071`
+  - 验证到原点初始化会导致 `front=0`
+  - 改为估计多相机共同注视点,围绕 focus 生成初始化点云
+  - 新增 `points3d_metadata.json`, 自动淘汰旧版错误点云缓存
+- 最后补充:
+  - `tests/test_lyra_generated_loader.py` 回归测试
+  - `README.md` 直连用法说明
+  - `specs/lyra_direct_loader.md` 规格文档
+
+### 总结感悟
+- 对“已知位姿但无稀疏点”的生成数据, 真正要尊重的不只是 pose 真值, 还包括轨迹围绕的公共关注区域.
+- direct loader 一旦会落缓存, 就必须给派生几何结果做版本元数据. 否则代码修好了, 用户磁盘里的旧缓存仍然会把问题悄悄带回来.
+
+## [2026-03-14 09:22:24 UTC] 任务名称: 为 Lyra direct loader 增加一键训练脚本
+
+### 任务内容
+- 为已支持 direct loader 的 Lyra generated root 补一个一键训练入口.
+- 让用户不必再手写长串 `pixi run python train.py ...`.
+- 保持脚本接口风格与仓库现有 `run_s01_fastgs.sh` 尽量一致.
+
+### 完成过程
+- 回读现有脚本和 README 入口说明后, 新增了 `scripts/run_lyra_fastgs.sh`.
+- 脚本默认指向当前环境中的:
+  - `/workspace/lyra/assets/demo/static/diffusion_output_generated_my`
+- 同时支持:
+  - `--source-path`
+  - `--model-path`
+  - `--overwrite`
+  - `--eval` / `--no-eval`
+  - 常用 FastGS 高频训练参数透传
+- 随后同步更新:
+  - `README.md`
+  - `specs/lyra_direct_loader.md`
+- 最后完成脚本级验证:
+  - `bash -n scripts/run_lyra_fastgs.sh`
+  - `bash scripts/run_lyra_fastgs.sh --help`
+  - `bash scripts/run_lyra_fastgs.sh --iterations 10 --model-path output/lyra_script_smoke --overwrite`
+  - 真实输出确认 `Training complete.`
+
+### 总结感悟
+- 当底层直读逻辑已经稳定后, 最有价值的“新增”不是再包一层复杂流程, 而是提供一个薄而稳的入口.
+- 一键脚本的关键不是参数越多越好, 而是默认值要可靠, 覆盖开关要清楚, 并且要真的跑过一次.
+
+## [2026-03-14 09:54:08 UTC] 任务名称: 为 Lyra 一键脚本补 render + metrics 评估阶段
+
+### 任务内容
+- 继续扩展 `scripts/run_lyra_fastgs.sh`, 让它不只支持训练, 还支持评估.
+- 提供一条命令跑完:
+  - `render.py`
+  - `metrics.py`
+- 优先改良现有脚本, 不新增平行评估脚本.
+
+### 完成过程
+- 先回读了:
+  - `render.py`
+  - `metrics.py`
+  - `docs/fastgs-train-scripts.md`
+  - `scripts/run_lyra_fastgs.sh`
+- 确认:
+  - `metrics.py` 只消费 `test/` 渲染结果
+  - `render.py` 的命令行默认 `--mult=0.5` 会覆盖训练保存配置
+- 随后将 `scripts/run_lyra_fastgs.sh` 扩展为支持:
+  - `--phase train`
+  - `--phase render`
+  - `--phase metrics`
+  - `--phase evaluate`
+  - `--phase all`
+- 同时新增:
+  - `--iteration`
+  - render 阶段自动从 `cfg_args` 回读 `mult`
+  - 按阶段生效的 `--overwrite`
+- 然后同步更新:
+  - `README.md`
+  - `specs/lyra_direct_loader.md`
+- 最后完成真实验证:
+  - `bash -n scripts/run_lyra_fastgs.sh`
+  - `bash scripts/run_lyra_fastgs.sh --help`
+  - `bash scripts/run_lyra_fastgs.sh --phase evaluate --model-path output/lyra_script_smoke --overwrite`
+
+### 总结感悟
+- “评估一键脚本”最容易漏的不是命令拼接, 而是训练与渲染口径一致性.
+- 如果 render 阶段直接吃默认 `--mult`, 即使训练是对的, 评估也会被悄悄带偏.
+
 ## [2026-03-11 08:37:20 UTC] 任务名称: 为 `run_s01_fastgs.sh` 增加 FastGS 高频训练参数配置
 
 ### 任务内容
@@ -390,3 +506,191 @@
 ### 总结感悟
 - 这类“刚才报错, 现在复查看不见”的问题, 很多时候是旧版本脚本的运行残留, 不一定是当前工作区文件仍然有问题.
 - 排这类问题时, 先用 `bash -n` 和最小 `--help` 执行确认当前文件状态, 比直接继续补丁更稳.
+
+## [2026-03-14 08:34:09 UTC] 任务名称: 判断 `diffusion_output_generated_my` 是否需要脚本改造才能直连 3DGS
+
+### 任务内容
+- 核查路径 `/workspace/lyra/assets/demo/static/diffusion_output_generated_my` 的真实目录结构.
+- 判断现有 `convert.py` / `train.py` / 一键脚本能否直接使用该路径.
+- 给出“现阶段能跑”与“长期更正确支持”之间的边界结论.
+
+### 完成过程
+- 先回读六文件并按仓库规则将超过 1000 行的旧 `task_plan.md` 续档.
+- 动态检查目标目录,确认它是 `0..5/{rgb,pose,intrinsics,latent}` 结构,其中包含 6 个 `rgb/*.mp4`,但没有 `sparse/`、`input/` 和 `transforms_train.json`.
+- 继续用最小动态验证确认:
+  - `convert.py` 会把该路径识别为 `rgb_recursive` 视频目录
+  - 能发现 6 个视频输入
+- 对照源码确认:
+  - `train.py` 入口实际只接受 COLMAP 场景或 Blender `transforms_train.json`
+  - `convert.py` 虽然能吃这类视频目录,但会忽略现成的 `.npz` pose / intrinsics, 仍按 COLMAP 单相机假设做预处理
+- 最终将结论与后续改造方向回填到 `task_plan.md`、`notes.md`、`LATER_PLANS.md`、`EPIPHANY_LOG.md`.
+
+### 总结感悟
+- 判断“脚本要不要改”时, 先分清“能不能从这个路径开始跑”与“能不能把这个路径直接当成训练输入”, 这两个问题不是一回事.
+- 当原始数据已经自带位姿和内参时, 继续回退到 COLMAP 猜几何通常只是最小可用方案, 不是长期最优方案.
+
+## [2026-03-14 11:58:30 UTC] 任务名称: 完成 Lyra direct 与 COLMAP 快速基线评估
+
+### 任务内容
+- 为 Lyra generated root 跑出一套 direct loader 的正式 30000 iter 指标.
+- 同时跑出一套不读取 Lyra 自带 `pose/intrinsics` 的 COLMAP 传统流程基线.
+- 在用户要求停止重型全量 `24 fps` 方案后, 改用更快的 `--video-fps 4` 路线完成一版可交付评估.
+
+### 完成过程
+- 先回收 direct 侧完整结果:
+  - `bash scripts/run_lyra_fastgs.sh --phase all -r 1 --model-path output/lyra_direct_r1_30000 --overwrite`
+  - 输出指标:
+    - `PSNR=28.884437561035156`
+    - `SSIM=0.9080439209938049`
+    - `LPIPS=0.16255009174346924`
+  - 最终高斯数:
+    - `75825`
+- 随后曾启动一轮全量 COLMAP:
+  - `--video-fps 24`
+  - 实际抽出 `726` 张图
+  - 但 `mapper + 全局 BA` 代价过高,在用户明确要求下停止.
+- 再切换为快速 COLMAP 基线:
+  - `bash scripts/run_lyra_colmap_fastgs.sh --phase all -r 1 --camera-model SIMPLE_PINHOLE --video-fps 4 --fastgs-root data/diffusion_output_generated_my_colmap_fastgs_quick --model-path output/lyra_colmap_r1_quick_eval --overwrite`
+  - 该路线完成:
+    - 抽帧 `120` 张
+    - COLMAP 稀疏重建 `120 images / 19577 points`
+    - FastGS 训练、渲染、指标计算
+  - 输出指标:
+    - `PSNR=30.28389549255371`
+    - `SSIM=0.9319607615470886`
+    - `LPIPS=0.13405002653598785`
+  - 最终高斯数:
+    - `67968`
+- 同步更新了:
+  - `README.md`
+  - `specs/lyra_direct_loader.md`
+  - `task_plan.md`
+  - `notes.md`
+
+### 总结感悟
+- 对视频型 COLMAP 基线, “GPU 版 COLMAP 已启用”不等于“整体就一定快”, 真正拖时间的是 `mapper + 全局 BA`.
+- `--video-fps 4` 这种快速基线很适合先拿一版传统流程结果, 但它和 direct 的全量评测不在同一 test 集上, 不能被误写成严格公平对比.
+
+## [2026-03-14 12:16:00 UTC] 任务名称: 回查 `/workspace/FlashVSR-Pro` 的真实超分命令
+
+### 任务内容
+- 确认之前的超分是否真的是通过 `/workspace/FlashVSR-Pro` 做的.
+- 找到最接近“当时真实执行”的命令, 而不是只给 README 示例.
+- 区分底层 `infer.py` 单视频命令与上层批处理 wrapper 命令.
+
+### 完成过程
+- 先回读六文件上下文, 再将本次排查目标追加到 `task_plan.md`.
+- 检查 `/workspace/FlashVSR-Pro` 仓库入口, 确认核心 CLI 为 `infer.py`, 同时存在 `batch_inference.py` 与 `long_video_worker.py`.
+- 继续检查 `/workspace/lyra/scripts/run_flashvsr_reference.py` 与 `/workspace/lyra/src/refinement_v2/flashvsr_reference.py`, 确认 `lyra` 侧确实封装了对 `FlashVSR-Pro` 的调用.
+- 从真实产物 `/workspace/lyra/outputs/flashvsr_reference/flashvsr_reference_summary.json` 与 `flashvsr_full.log` 中提取到动态证据, 确认曾真实执行:
+  - `/workspace/lyra/.pixi/envs/default/bin/python3 infer.py -i /workspace/lyra/assets/demo/static/diffusion_output_generated/1/rgb/00172.mp4 -o /workspace/lyra/outputs/flashvsr_reference/full_scale2x/1/rgb/00172.mp4 --mode full --scale 2.0 --dtype bf16 --quality 10`
+- 最后把证据与结论追加写入 `notes.md` 与 `task_plan.md`.
+
+### 总结感悟
+- 追溯“之前到底跑了什么命令”时, 产物目录下的 manifest / summary / log 往往比 shell history 更可靠.
+- 对这种“外部仓库 + 本仓库 wrapper”结构, 最容易混淆的不是参数本身, 而是到底该回答“底层命令”还是“顶层入口命令”. 这次两层都保留下来, 后续复用会更稳.
+
+## [2026-03-14 12:28:00 UTC] 任务名称: 在 FastGS 侧固化 FlashVSR 一键脚本
+
+### 任务内容
+- 新增一个 FastGS 侧脚本, 一键触发 `/workspace/lyra/scripts/run_flashvsr_reference.py`.
+- 让脚本默认适配当前机器真实可用的 FlashVSR 本地环境.
+- 保留 `local` / `docker` 两种 runner 的切换能力.
+
+### 完成过程
+- 先回读现有 `scripts/run_lyra_fastgs.sh`、`scripts/run_lyra_colmap_fastgs.sh` 的接口风格, 再决定新脚本继续用 bash wrapper.
+- 新增:
+  - `scripts/run_lyra_flashvsr_reference.sh`
+- 脚本中完成了这些关键封装:
+  - 自动解析 `lyra` 与 `FlashVSR-Pro` 仓库路径
+  - 默认使用 `/workspace/lyra/.pixi/envs/default/bin/python3`
+  - 自动设置 `PYTHONPATH=/workspace/FlashVSR-Pro:/workspace/lyra`
+  - local runner 下自动推导并设置 `LD_LIBRARY_PATH`
+  - 暴露 `--mode`、`--scale`、`--dtype`、`--quality`、`--view-ids`、`--scene-stem`、`--dry-run` 等常用参数
+- 中途通过 dry-run 发现两个问题并修正:
+  - 默认输入优先级若先选 `diffusion_output_generated_my`, 会和历史 `00172` 示例不匹配
+  - `torch/lib` 路径若只靠 glob, 会误命中 `python3.1`
+- 最终验证:
+  - `bash -n scripts/run_lyra_flashvsr_reference.sh`
+  - `bash scripts/run_lyra_flashvsr_reference.sh --help`
+  - `bash scripts/run_lyra_flashvsr_reference.sh --view-ids 5 --scene-stem 00172 --dry-run --output-root /tmp/flashvsr_reference_dryrun_fastgs_verify`
+  - `bash scripts/run_lyra_flashvsr_reference.sh --view-ids 5 --scene-stem 00172 --output-root /tmp/flashvsr_reference_actual_fastgs_verify --overwrite`
+  - 真实单视频输出:
+    - `/tmp/flashvsr_reference_actual_fastgs_verify/full_scale2x/5/rgb/00172.mp4`
+    - `/tmp/flashvsr_reference_actual_fastgs_verify/full_scale2x/5/manifests/00172.json`
+    - `/tmp/flashvsr_reference_actual_fastgs_verify/flashvsr_reference_summary.json`
+
+### 总结感悟
+- 环境型 wrapper 最怕的不是参数多, 而是把“已经失效的旧 Python 路径”继续写死在脚本里. 这次直接按当前机器真实存在的 pixi 环境固化, 风险小得多.
+- dry-run 不只是“看命令长什么样”, 它还能很快暴露输入根目录默认值和动态库路径这种容易漏掉的问题, 性价比很高.
+
+## [2026-03-14 16:34:00 UTC] 任务名称: 打通 `FlashVSR -> FastGS` 串联脚本并验证长文件名
+
+### 任务内容
+- 完成 `scripts/run_lyra_flashvsr_fastgs.sh` 的最后校正与验证.
+- 确认带空格、中文、逗号的 `.mp4` 文件名能从 `--source-video` 一路走到 FlashVSR 与 FastGS.
+- 把新入口同步到现有规格文档里.
+
+### 完成过程
+- 先重新回读:
+  - `scripts/run_lyra_flashvsr_reference.sh`
+  - `scripts/run_lyra_flashvsr_fastgs.sh`
+  - `scripts/run_lyra_fastgs.sh`
+  - `scripts/run_lyra_colmap_fastgs.sh`
+- 静态验证通过:
+  - `bash -n scripts/run_lyra_flashvsr_fastgs.sh`
+  - `bash scripts/run_lyra_flashvsr_fastgs.sh --help`
+- 长文件名 dry-run 通过:
+  - `bash scripts/run_lyra_flashvsr_fastgs.sh --source-video "<xhc长路径>" --phase superres --dry-run --flashvsr-output-root /tmp/flashvsr_xhc_dryrun_chain_verify`
+- 真实 `prepare` 首次验证暴露脚本错误:
+  - `DRY_RUN: unbound variable`
+- 随后修复:
+  - 给 `run_lyra_flashvsr_fastgs.sh` 增加 `DRY_RUN=0`
+  - 补齐 `--fallback-tile-size` 与 `--fallback-overlap` 的透传
+- 修复后重新验证:
+  - `bash scripts/run_lyra_flashvsr_fastgs.sh --source-video "<xhc长路径>" --phase prepare --view-ids 0 --flashvsr-output-root /tmp/flashvsr_xhc_prepare_actual --prepared-root data/flashvsr_xhc_prepare_actual_root --overwrite`
+  - 成功生成:
+    - `/tmp/flashvsr_xhc_prepare_actual/full_scale2x/0/rgb/<长文件名>.mp4`
+    - `/workspace/FastGS/data/flashvsr_xhc_prepare_actual_root/0/{rgb,pose,intrinsics}`
+- 再做 direct 最小训练验证:
+  - `bash scripts/run_lyra_flashvsr_fastgs.sh --source-video "<xhc长路径>" --phase train --view-ids 0 --flashvsr-output-root /tmp/flashvsr_xhc_prepare_actual --prepared-root data/flashvsr_xhc_prepare_actual_root --model-path output/flashvsr_xhc_chain_train_smoke --iterations 1 -r 8 --no-eval --overwrite`
+  - 关键输出:
+    - `Found Lyra generated multi-view root, loading direct pose/intrinsics inputs!`
+    - `Training complete.`
+- 最后同步:
+  - `chmod +x scripts/run_lyra_flashvsr_fastgs.sh`
+  - 更新 `specs/lyra_direct_loader.md`
+  - 续档旧 `notes.md` 到 `archive/notes_2026-03-14_163400.md`
+
+### 总结感悟
+- 对 bash 串联脚本, 最容易漏掉的不是路径引号, 而是 `set -u` 下的布尔开关初始化.
+- 长文件名支持真正稳不稳, 不能只看 dry-run. 至少要让真实产物和一次最小训练都跑通.
+
+## [2026-03-14 17:45:00 UTC] 任务名称: 修复 `COLMAP images.bin` 对中文长文件名的读取失败
+
+### 任务内容
+- 修复 `--pipeline colmap` 在训练读取 `images.bin` 时, 因中文长文件名触发的 `UnicodeDecodeError`.
+- 同时补上文本分支对带空格文件名的兼容.
+- 用真实 `xhc_flashvsr_colmap_fps12` 数据重新验证 wrapper 入口.
+
+### 完成过程
+- 先根据用户提供的调用栈定位到:
+  - `scene/colmap_loader.py::read_extrinsics_binary`
+- 对照官方 `COLMAP` 读取逻辑确认:
+  - 正确做法是先累积完整字节串, 再一次性做 UTF-8 解码
+- 在本仓库中完成修复:
+  - 新增 `read_null_terminated_utf8(fid)`
+  - `read_extrinsics_binary(...)` 改为先读完整字节串再 decode
+  - `read_extrinsics_text(...)` 改为 `encoding="utf-8"` + `split(maxsplit=9)`
+- 新增回归测试:
+  - `tests/test_colmap_loader.py`
+  - 覆盖二进制与文本两种图像名解析
+- 验证:
+  - `pixi run python -m py_compile scene/colmap_loader.py tests/test_colmap_loader.py`
+  - `pixi run python -m unittest tests.test_colmap_loader`
+  - `pixi run python train.py -s /workspace/FastGS/data/xhc_flashvsr_colmap_fps12 -i images -m /workspace/FastGS/output/xhc_flashvsr_colmap_fps12_unicode_smoke --iterations 1 -r 8 --eval`
+  - `bash scripts/run_lyra_flashvsr_fastgs.sh --source-video "<xhc长路径>" --phase train --pipeline colmap --video-fps 12 --fastgs-root /workspace/FastGS/data/xhc_flashvsr_colmap_fps12 --model-path /workspace/FastGS/output/xhc_flashvsr_colmap_fps12_wrapper_smoke --iterations 1 -r 8 --overwrite`
+
+### 总结感悟
+- 对 `COLMAP` 这类二进制格式, 文件名字段虽然是“字符串”, 但底层仍是字节流. 只要文件名允许非 ASCII, 就绝不能逐字节 `decode("utf-8")`.
+- 这类问题常常会被误判成“COLMAP 重建失败”, 但真正坏掉的可能只是下游解析器.

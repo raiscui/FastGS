@@ -173,3 +173,134 @@
     - `exhaustive_matcher 完成: two_view_geometries=15`
     - `Reconstruction with 6 images and 1974 points`
     - `Training complete.`
+
+## [2026-03-14 09:05:22 UTC] 错误名称: Lyra direct loader 首轮 backward 报 `cudaErrorInvalidConfiguration`
+
+### 问题现象
+- 真实命令:
+  - `pixi run python train.py -s /workspace/lyra/assets/demo/static/diffusion_output_generated_my -m output/dj_style_direct_smoke --iterations 10 --eval -r 8`
+- direct loader 已经成功读取 Lyra 场景.
+- 但训练在第一次 backward 就失败:
+  - `torch.AcceleratorError: CUDA error: invalid configuration argument`
+- 最小复现定位到首轮选中的相机:
+  - `dj-style_v4_f00071`
+
+### 原因
+- 根因不是目录识别失败, 也不是 `pose/intrinsics` 读取失败.
+- 已通过静态与动态证据确认:
+  - Lyra 的相机轨迹共同注视点在 `z≈8.855`
+  - 旧版 direct loader 仍沿用“围绕原点”的随机点云初始化
+  - 对失败相机 `dj-style_v4_f00071`, 原点在相机后方:
+    - `dot_to_origin = -1.41003`
+  - 共同注视点在相机前方:
+    - `dot_to_focus = 7.44510`
+  - 几何投影验证:
+    - 原点初始化: `origin_front = 0`, `origin_inside = 0`
+    - focus 初始化: `focus_front = 100000`, `focus_inside = 64612`
+- 因此首轮报错的真正原因是:
+  - 初始化点云没有落在场景公共关注区域内, 导致某些视角完全看不到任何点.
+
+### 修复
+- 在 `scene/dataset_readers.py` 中新增:
+  - 从训练相机反推相机中心与前向方向
+  - 用多条视线最小二乘估计共同注视点
+  - 用 `median(camera_to_focus_distance) * 0.25` 估计初始化范围
+  - 围绕 focus 中心生成 Lyra 初始化点云
+- 同时新增:
+  - `points3d_metadata.json`
+  - 缓存版本校验
+  - 自动重建旧版“围绕原点”的错误缓存
+
+### 验证
+- 静态校验:
+  - `pixi run python -m py_compile scene/dataset_readers.py scene/__init__.py tests/test_lyra_generated_loader.py`
+- 单元测试:
+  - `pixi run python -m unittest discover -s tests -p 'test_lyra_generated_loader.py'`
+  - 结果: `Ran 4 tests ... OK`
+- 真实目录验证:
+  - `readLyraGeneratedSceneInfo(...)` 生成了新的 `points3d_metadata.json`
+  - `pcd_center ≈ [0.0035, -0.0092, 8.8539]`
+- 真实 smoke train:
+  - `pixi run python train.py -s /workspace/lyra/assets/demo/static/diffusion_output_generated_my -m output/dj_style_direct_smoke_focus --iterations 10 --eval -r 8`
+  - 关键输出:
+    - `Number of points at initialisation : 100000`
+    - `Training progress ... 10/10`
+    - `Training complete.`
+
+## [2026-03-14 16:26:00 UTC] 错误名称: `run_lyra_flashvsr_fastgs.sh` 在 `phase prepare` 前即因 `DRY_RUN` 未初始化退出
+
+### 问题现象
+- 真实命令:
+  - `bash scripts/run_lyra_flashvsr_fastgs.sh --source-video "<xhc长路径>" --phase prepare --view-ids 0 --flashvsr-output-root /tmp/flashvsr_xhc_prepare_actual --prepared-root data/flashvsr_xhc_prepare_actual_root --overwrite`
+- 脚本还没进入真实超分, 就直接报错:
+  - `scripts/run_lyra_flashvsr_fastgs.sh: line 761: DRY_RUN: unbound variable`
+
+### 原因
+- 根因不在长文件名, 也不在 FlashVSR 本体.
+- 已通过失败位置确认:
+  - 脚本启用了 `set -euo pipefail`
+  - 但顶部没有给 `DRY_RUN` 赋默认值
+  - 后面参数校验阶段直接访问 `DRY_RUN`, 于是被 `set -u` 打断
+
+### 修复
+- 在 `scripts/run_lyra_flashvsr_fastgs.sh` 中新增:
+  - `DRY_RUN=0`
+- 顺手补齐:
+  - `--fallback-tile-size`
+  - `--fallback-overlap`
+  这两个选项从串联脚本到 `run_lyra_flashvsr_reference.sh` 的透传, 避免链路能力缩水
+
+### 验证
+- 静态校验:
+  - `bash -n scripts/run_lyra_flashvsr_fastgs.sh`
+- 修复后真实 `prepare`:
+  - 命令同上
+  - 成功生成 SR 视频与 symlink root
+- 修复后真实 `train` smoke:
+  - `bash scripts/run_lyra_flashvsr_fastgs.sh --source-video "<xhc长路径>" --phase train --view-ids 0 --flashvsr-output-root /tmp/flashvsr_xhc_prepare_actual --prepared-root data/flashvsr_xhc_prepare_actual_root --model-path output/flashvsr_xhc_chain_train_smoke --iterations 1 -r 8 --no-eval --overwrite`
+  - 关键输出:
+    - `Found Lyra generated multi-view root`
+    - `Training complete.`
+
+## [2026-03-14 17:45:00 UTC] 错误名称: `read_extrinsics_binary` 无法解析 `COLMAP images.bin` 中的中文文件名
+
+### 问题现象
+- 用户真实执行 `--pipeline colmap` 训练时, 报错:
+  - `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xe6 in position 0: unexpected end of data`
+- 调用栈定位到:
+  - `scene/colmap_loader.py::read_extrinsics_binary`
+- 后续回退到文本分支时, 又因为没有 `images.txt` 继续失败
+
+### 原因
+- 根因不是 `COLMAP` 没有重建出相机.
+- 已通过静态对照和真实复现确认:
+  - `images.bin` 中的 `image_name` 含中文 UTF-8 多字节字符
+  - 当前解析器按单字节逐个 `.decode("utf-8")`
+  - 这会把一个字符拆成多个字节, 从而直接解码失败
+- 另外, 文本分支 `read_extrinsics_text(...)` 也存在潜在兼容性问题:
+  - `line.split()` 会把带空格文件名拆坏
+
+### 修复
+- 在 `scene/colmap_loader.py` 中新增:
+  - `read_null_terminated_utf8(fid)`
+- 调整:
+  - `read_extrinsics_binary(...)` 改为先积累完整字节串, 再一次性 `decode("utf-8")`
+  - `read_extrinsics_text(...)` 改为 `encoding="utf-8"` + `split(maxsplit=9)`
+- 新增回归测试:
+  - `tests/test_colmap_loader.py`
+
+### 验证
+- 单元测试:
+  - `pixi run python -m unittest tests.test_colmap_loader`
+  - 结果:
+    - `Ran 2 tests ... OK`
+- 真实数据 smoke train:
+  - `pixi run python train.py -s /workspace/FastGS/data/xhc_flashvsr_colmap_fps12 -i images -m /workspace/FastGS/output/xhc_flashvsr_colmap_fps12_unicode_smoke --iterations 1 -r 8 --eval`
+  - 关键输出:
+    - `Reading camera 180/180`
+    - `Training complete.`
+- 真实 wrapper smoke train:
+  - `bash scripts/run_lyra_flashvsr_fastgs.sh --source-video "<xhc长路径>" --phase train --pipeline colmap --video-fps 12 --fastgs-root /workspace/FastGS/data/xhc_flashvsr_colmap_fps12 --model-path /workspace/FastGS/output/xhc_flashvsr_colmap_fps12_wrapper_smoke --iterations 1 -r 8 --overwrite`
+  - 关键输出:
+    - `Reading camera 180/180`
+    - `Training complete.`

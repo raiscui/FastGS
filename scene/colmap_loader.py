@@ -80,6 +80,20 @@ def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
     data = fid.read(num_bytes)
     return struct.unpack(endian_character + format_char_sequence, data)
 
+
+def read_null_terminated_utf8(fid):
+    """读取以 NUL 结尾的 UTF-8 字符串.
+
+    这里必须先累积完整字节串, 再一次性解码.
+    如果按单字节逐个 `decode("utf-8")`, 中文这类多字节字符会被拆坏.
+    """
+    raw_name = bytearray()
+    current_char = read_next_bytes(fid, 1, "c")[0]
+    while current_char != b"\x00":
+        raw_name.extend(current_char)
+        current_char = read_next_bytes(fid, 1, "c")[0]
+    return raw_name.decode("utf-8")
+
 def read_points3D_text(path):
     """
     see: src/base/reconstruction.cc
@@ -193,11 +207,7 @@ def read_extrinsics_binary(path_to_model_file):
             qvec = np.array(binary_image_properties[1:5])
             tvec = np.array(binary_image_properties[5:8])
             camera_id = binary_image_properties[8]
-            image_name = ""
-            current_char = read_next_bytes(fid, 1, "c")[0]
-            while current_char != b"\x00":   # look for the ASCII 0 entry
-                image_name += current_char.decode("utf-8")
-                current_char = read_next_bytes(fid, 1, "c")[0]
+            image_name = read_null_terminated_utf8(fid)
             num_points2D = read_next_bytes(fid, num_bytes=8,
                                            format_char_sequence="Q")[0]
             x_y_id_s = read_next_bytes(fid, num_bytes=24*num_points2D,
@@ -246,14 +256,15 @@ def read_extrinsics_text(path):
     Taken from https://github.com/colmap/colmap/blob/dev/scripts/python/read_write_model.py
     """
     images = {}
-    with open(path, "r") as fid:
+    with open(path, "r", encoding="utf-8") as fid:
         while True:
             line = fid.readline()
             if not line:
                 break
             line = line.strip()
             if len(line) > 0 and line[0] != "#":
-                elems = line.split()
+                # `NAME` 可能包含空格, 只能限制前 9 个字段分割.
+                elems = line.split(maxsplit=9)
                 image_id = int(elems[0])
                 qvec = np.array(tuple(map(float, elems[1:5])))
                 tvec = np.array(tuple(map(float, elems[5:8])))
