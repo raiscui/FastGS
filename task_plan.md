@@ -630,3 +630,119 @@
 - 2026-03-14 17:45:00 UTC: 最强备选解释是:
   - 即便二进制读取修好, 文本回退分支 `read_extrinsics_text(...)` 也仍可能因为 `split()` 无法处理带空格文件名而失败
 - 2026-03-14 17:45:00 UTC: 下一步先修复 `scene/colmap_loader.py` 的二进制与文本图像名解析, 再用用户这套 `xhc_flashvsr_colmap_fps12` 真实数据重试最小训练入口.
+
+---
+
+# 任务计划: 修复 `convert.py` 在多 COLMAP 子模型场景下固定选错 `sparse/0`
+
+## 目标
+- 确认 `/workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12` 训练首轮 `cudaErrorInvalidConfiguration` 的真实原因.
+- 若根因是 `convert.py` 固定选择了错误的 COLMAP 子模型, 则修复为自动选择最佳 sparse model.
+- 保证修复后, 同类数据不会再因为 `sparse/0` 只有极少点云而在训练首轮崩溃.
+
+## 两种方向
+- 方案A(不惜代价,最佳): 在 `convert.py` 中自动分析 `distorted/sparse/*` 所有子模型,按“注册图像数优先,点数次优先”选择最佳模型再做 undistort.
+- 方案B(先能用,后面再优雅): 不改代码,只手动把 `distorted/sparse/2` 复制成 `sparse/0`,并告知用户以后手动挑模型.
+
+## 阶段
+- [ ] 阶段1: 回读上下文并记录现象 / 假设 / 验证计划
+- [ ] 阶段2: 验证是否存在“更好的 sparse 子模型”
+- [ ] 阶段3: 修改 `convert.py` 自动选择最佳子模型
+- [ ] 阶段4: 补回归测试与动态验证
+- [ ] 阶段5: 回写六文件并交付
+
+## 关键问题
+1. 当前失败到底是 CUDA kernel 自身问题, 还是训练输入只剩极小点云?
+2. `mapper` 是否产出了多个 sparse 子模型, 而脚本错误地固定选了 `0`?
+3. “最佳子模型”应该按什么规则选, 才不会引入新的特殊情况?
+4. 修复后, 是否能用真实 `xhc_bai` 数据把 `Number of points at initialisation` 从 `2` 恢复到正常量级?
+
+## 状态
+**目前在阶段2**
+- 2026-03-15 06:12:00 UTC: 已完成六文件回读, 发现历史上存在另一类 `cudaErrorInvalidConfiguration`, 但那次是 direct loader 初始化点云错误, 与本次 `xhc_bai` 日志不一致.
+- 2026-03-15 06:12:00 UTC: 当前观察到的现象是:
+  - 失败日志显示 `Reading camera 4/4`
+  - `Number of points at initialisation : 2`
+  - `output/xhc_bai_flashvsr_colmap_fps12/input.ply` 只有 283 字节
+- 2026-03-15 06:12:00 UTC: 当前主假设是:
+  - `convert.py` 把 `image_undistorter` 的输入硬编码为 `distorted/sparse/0`
+  - 但当前数据的最佳模型不是 `0`, 导致训练吃到只有 4 张注册图、2 个点的劣质模型
+- 2026-03-15 06:12:00 UTC: 最强备选解释是:
+  - 这批素材本身就无法得到稳定 COLMAP 重建, 即使切到别的子模型也仍会失败
+- 2026-03-15 06:12:00 UTC: 下一步先做最小可证伪实验:
+  - 统计 `distorted/sparse/*` 各子模型的注册图像数与点数
+  - 再手动让 undistorter 走最佳子模型, 用 1 iter 训练验证是否立即恢复
+
+## 进度更新
+- 2026-03-15 06:16:00 UTC: 最小验证已经给出动态证据:
+  - `distorted/sparse/0`: `Registered images=4`, `Points=2`
+  - `distorted/sparse/1`: `Registered images=15`, `Points=2581`
+  - `distorted/sparse/2`: `Registered images=360`, `Points=92946`
+- 2026-03-15 06:16:00 UTC: 已手动执行:
+  - `colmap image_undistorter --input_path .../distorted/sparse/2`
+  - 再用该结果执行 `pixi run python train.py ... --iterations 1 -r 8 --eval`
+- 2026-03-15 06:16:00 UTC: 动态验证结果:
+  - 训练日志恢复为 `Reading camera 360/360`
+  - `Number of points at initialisation : 92946`
+  - `Training complete.`
+- 2026-03-15 06:16:00 UTC: 当前结论:
+  - 上一条“素材本身不可训练”的备选解释被推翻
+  - 本次首轮 CUDA 崩溃的根因是 `convert.py` 固定选择 `distorted/sparse/0`, 误用了最差子模型
+
+## 当前待办
+- [x] 阶段1: 回读上下文并记录现象 / 假设 / 验证计划
+- [x] 阶段2: 验证是否存在“更好的 sparse 子模型”
+- [ ] 阶段3: 修改 `convert.py` 自动选择最佳子模型
+- [ ] 阶段4: 补回归测试与动态验证
+- [ ] 阶段5: 回写六文件并交付
+
+## 进度更新
+- 2026-03-15 06:20:00 UTC: 阶段3 已完成:
+  - `convert.py` 新增多子模型统计与选择逻辑
+  - 不再硬编码 `distorted/sparse/0`
+  - 当前默认按 `registered_images -> points -> cameras` 排序选择最佳模型
+- 2026-03-15 06:20:00 UTC: 阶段4 已完成:
+  - `pixi run python -m py_compile convert.py tests/test_convert.py`
+  - `pixi run python -m unittest tests.test_convert`
+  - `pixi run python convert.py --skip_matching -s /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12_convert_fix_verify`
+  - `pixi run python train.py -s /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12_convert_fix_verify -i images -m /workspace/FastGS/output/xhc_bai_convert_fix_verify_smoke --iterations 1 -r 8 --eval`
+- 2026-03-15 06:20:00 UTC: 关键验证结果:
+  - `convert.py` 日志明确选择 `sparse/2`
+  - 真实转换后训练日志恢复为 `Reading camera 360/360`
+  - `Number of points at initialisation : 92946`
+  - `Training complete.`
+
+## 当前待办
+- [x] 阶段1: 回读上下文并记录现象 / 假设 / 验证计划
+- [x] 阶段2: 验证是否存在“更好的 sparse 子模型”
+- [x] 阶段3: 修改 `convert.py` 自动选择最佳子模型
+- [x] 阶段4: 补回归测试与动态验证
+- [x] 阶段5: 回写六文件并交付
+
+## 状态
+**目前已完成**
+- 2026-03-15 06:20:00 UTC: `xhc_bai_flashvsr_colmap_fps12` 这类“COLMAP 产出多个 sparse 子模型”的场景, 当前已经不会再默认误选最差的 `sparse/0`.
+- 2026-03-15 06:20:00 UTC: 这次问题的已验证结论是:
+  - 现象: 首轮训练只读到 `4/4` 相机和 `2` 个点
+  - 根因: `convert.py` 固定使用 `distorted/sparse/0`
+  - 修复: 自动选择最佳子模型再做 undistort
+  - 结果: 真实 `xhc_bai` smoke train 已恢复通过
+
+## 进度更新
+- 2026-03-15 06:23:00 UTC: 已把真实故障目录 `/workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12` 就地修复:
+  - 旧坏产物已备份为:
+    - `images_bad_20260315_0625`
+    - `sparse_bad_20260315_0625`
+  - 保留原 `distorted/` 结果, 用新 `convert.py --skip_matching` 重新生成了正确的 `images/` 与 `sparse/0/`
+- 2026-03-15 06:23:00 UTC: 真实源目录再验证:
+  - `pixi run python train.py -s /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12 -i images -m /workspace/FastGS/output/xhc_bai_flashvsr_colmap_fps12_fixed_smoke --iterations 1 -r 8 --eval`
+  - 关键输出:
+    - `Reading camera 360/360`
+    - `Number of points at initialisation : 92946`
+    - `Training complete.`
+- 2026-03-15 06:24:00 UTC: 原始报错模型输出路径也已复跑通过:
+  - `pixi run python train.py -s /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12 -i images -m /workspace/FastGS/output/xhc_bai_flashvsr_colmap_fps12 --iterations 1 -r 8 --eval`
+  - 关键输出:
+    - `Reading camera 360/360`
+    - `Number of points at initialisation : 92946`
+    - `Training complete.`

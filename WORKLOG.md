@@ -694,3 +694,29 @@
 ### 总结感悟
 - 对 `COLMAP` 这类二进制格式, 文件名字段虽然是“字符串”, 但底层仍是字节流. 只要文件名允许非 ASCII, 就绝不能逐字节 `decode("utf-8")`.
 - 这类问题常常会被误判成“COLMAP 重建失败”, 但真正坏掉的可能只是下游解析器.
+
+## [2026-03-15 06:20:00 UTC] 任务名称: 修复 `convert.py` 在多 COLMAP 子模型场景下误选 `sparse/0`
+
+### 任务内容
+- 排查 `xhc_bai_flashvsr_colmap_fps12` 首轮训练的 `cudaErrorInvalidConfiguration`.
+- 确认失败到底来自 CUDA 训练侧, 还是更早的 COLMAP 转换产物选择错误.
+- 修复 `convert.py` 在 `mapper` 产出多个 sparse 子模型时的默认选择逻辑.
+
+### 完成过程
+- 先回读六文件, 区分这次错误和历史上 direct loader 的另一类 `cudaErrorInvalidConfiguration`.
+- 通过 `colmap model_analyzer` 与真实训练对照, 确认:
+  - `distorted/sparse/0` 只有 4 张注册图和 2 个点
+  - `distorted/sparse/2` 才是 360 张注册图、92946 个点的完整模型
+- 手动让 `image_undistorter` 改走 `sparse/2`, 再跑 1 iter 训练, 用动态证据证明:
+  - 根因是 `convert.py` 固定使用 `sparse/0`
+  - 不是素材本身不可训练
+- 在 `convert.py` 中新增多子模型统计与自动选择逻辑.
+- 新增 `tests/test_convert.py`, 锁住:
+  - “注册图像数优先”的模型选择规则
+  - “点数作为次级排序键”的回归点
+  - `images.txt` 两行一图的文本计数逻辑
+
+### 总结感悟
+- COLMAP 的 `mapper` 会输出多个 sparse 子模型时, `sparse/0` 只代表“第一个”, 不代表“最好”.
+- 这类问题最容易被误判成训练 CUDA 崩溃, 但真正该修的往往是更上游的数据选择逻辑.
+- 这次不只是修了代码, 还把真实故障目录 `/workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12` 就地重建为正确的 `images/ + sparse/0/`, 这样用户手上的数据已经可以继续直接训练.

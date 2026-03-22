@@ -304,3 +304,79 @@
   - 关键输出:
     - `Reading camera 180/180`
     - `Training complete.`
+
+## [2026-03-15 06:20:00 UTC] 错误名称: `convert.py` 固定选择 `distorted/sparse/0` 导致首轮 `cudaErrorInvalidConfiguration`
+
+### 问题现象
+- 用户真实训练:
+  - `/workspace/FastGS/output/xhc_bai_flashvsr_colmap_fps12`
+- 关键失败信号:
+  - `Reading camera 4/4`
+  - `Number of points at initialisation : 2`
+  - 首轮 `loss.backward()` 报:
+    - `torch.AcceleratorError: CUDA error: invalid configuration argument`
+- 同一份数据的数据库统计却显示:
+  - `images=360`
+  - `two_view_geometries=64620`
+
+### 原因
+- 根因不是 CUDA kernel 自身随机坏掉.
+- 已通过静态和动态证据确认:
+  - `mapper` 实际产出了多个 sparse 子模型:
+    - `0`: `Registered images=4`, `Points=2`
+    - `1`: `Registered images=15`, `Points=2581`
+    - `2`: `Registered images=360`, `Points=92946`
+  - 旧版 `convert.py` 却把 `image_undistorter` 的输入硬编码成:
+    - `distorted/sparse/0`
+- 结果就是:
+  - undistort 和后续训练总是拿到最差模型
+  - 最终把“COLMAP 有好模型”误降级成“训练只有 2 个初始点”
+
+### 修复
+- 在 `convert.py` 中新增:
+  - `SparseModelStats`
+  - 多子模型统计逻辑
+  - `select_best_sparse_model(...)`
+- 默认选择规则:
+  - 先比 `registered_image_count`
+  - 再比 `point_count`
+  - 最后比 `camera_count`
+- `image_undistorter` 改为使用自动选出的最佳模型路径, 不再硬编码 `sparse/0`.
+- 同时新增回归测试:
+  - `tests/test_convert.py`
+
+### 验证
+- 静态校验:
+  - `pixi run python -m py_compile convert.py tests/test_convert.py`
+- 单元测试:
+  - `pixi run python -m unittest tests.test_convert`
+  - 结果:
+    - `Ran 3 tests ... OK`
+- 真实转换验证:
+  - `pixi run python convert.py --skip_matching -s /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12_convert_fix_verify`
+  - 关键日志:
+    - `Selected COLMAP sparse model '2'`
+- 真实训练验证:
+  - `pixi run python train.py -s /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12_convert_fix_verify -i images -m /workspace/FastGS/output/xhc_bai_convert_fix_verify_smoke --iterations 1 -r 8 --eval`
+  - 关键输出:
+    - `Reading camera 360/360`
+    - `Number of points at initialisation :  92946`
+    - `Training complete.`
+- 真实故障目录就地修复验证:
+  - 先备份旧坏产物:
+    - `images -> images_bad_20260315_0625`
+    - `sparse -> sparse_bad_20260315_0625`
+  - 再执行:
+    - `pixi run python convert.py --skip_matching -s /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12`
+    - `pixi run python train.py -s /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12 -i images -m /workspace/FastGS/output/xhc_bai_flashvsr_colmap_fps12_fixed_smoke --iterations 1 -r 8 --eval`
+  - 关键输出:
+    - `Selected COLMAP sparse model '2'`
+    - `Reading camera 360/360`
+    - `Number of points at initialisation :  92946`
+    - `Training complete.`
+- 原始报错输出路径回归验证:
+  - `pixi run python train.py -s /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12 -i images -m /workspace/FastGS/output/xhc_bai_flashvsr_colmap_fps12 --iterations 1 -r 8 --eval`
+  - 关键输出:
+    - `Reading camera 360/360`
+    - `Number of points at initialisation :  92946`
+    - `Training complete.`

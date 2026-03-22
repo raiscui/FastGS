@@ -165,3 +165,59 @@
 - 修复后:
   - 真实 `xhc_flashvsr_colmap_fps12` 数据可被成功读取
   - `--pipeline colmap` 路线已完成最小训练验证
+
+## [2026-03-15 06:16:00 UTC] `xhc_bai_flashvsr_colmap_fps12` 首轮 `cudaErrorInvalidConfiguration` 排查
+
+### 现象
+- 用户真实训练命令绑定的源目录是:
+  - `/workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12`
+- 失败日志关键信号:
+  - `Reading camera 4/4`
+  - `Number of points at initialisation : 2`
+  - 随后首轮 `loss.backward()` 报:
+    - `torch.AcceleratorError: CUDA error: invalid configuration argument`
+- 输出目录中的 `input.ply` 只有 283 字节.
+- 源数据侧静态检查:
+  - `images/` 里只有 4 张 undistorted 图片
+  - `distorted/database.db` 里却有 `images=360`, `two_view_geometries=64620`
+
+### 假设
+- 主假设:
+  - `mapper` 实际产出了多个 sparse 子模型.
+  - `convert.py` 把 `image_undistorter` 的输入硬编码成 `distorted/sparse/0`.
+  - 当前 `0` 正好是最差子模型, 所以训练只拿到 4 张图和 2 个点.
+- 备选解释:
+  - 这批素材本身就无法稳定重建.
+  - 即使切到其他 sparse 子模型, 训练仍会失败.
+
+### 静态证据
+- `convert.py` 当前实现固定写死:
+  - `--input_path <source_path>/distorted/sparse/0`
+- 真实目录里存在 3 个 sparse 子模型:
+  - `distorted/sparse/0`
+  - `distorted/sparse/1`
+  - `distorted/sparse/2`
+- `colmap model_analyzer` 结果:
+  - `sparse/0`: `Registered images=4`, `Points=2`
+  - `sparse/1`: `Registered images=15`, `Points=2581`
+  - `sparse/2`: `Registered images=360`, `Points=92946`
+
+### 动态验证
+- 手动让 undistorter 改走最佳模型:
+  - `colmap image_undistorter --image_path /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12/input --input_path /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12/distorted/sparse/2 --output_path /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12_besttmp --output_type COLMAP`
+- 再把结果整理为 FastGS 可读结构后, 执行:
+  - `CUDA_LAUNCH_BLOCKING=1 pixi run python train.py -s /workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12_bestverify -i images -m /workspace/FastGS/output/xhc_bai_bestverify_smoke --iterations 1 -r 8 --eval`
+- 关键输出:
+  - `Reading camera 360/360`
+  - `Number of points at initialisation :  92946`
+  - `Training complete.`
+
+### 结论
+- 上一条“素材本身不可训练”的备选解释已经被动态证据推翻.
+- 当前根因已经被静态与动态证据共同支持:
+  - 不是 CUDA kernel 自身随机出错
+  - 也不是这批素材天然不能重建
+  - 而是 `convert.py` 在多模型场景下固定选择 `distorted/sparse/0`, 误把最差子模型送进了训练链路
+- 最合理的修复方向:
+  - 在 `convert.py` 里自动选择最佳 sparse 子模型
+  - 默认优先注册图像数最多者, 点数作为次排序键

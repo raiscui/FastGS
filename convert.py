@@ -11,8 +11,10 @@
 
 import logging
 import shutil
+import struct
 import subprocess
 from argparse import ArgumentParser
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Set, Tuple
 
@@ -27,6 +29,14 @@ VIDEO_EXTENSIONS: Set[str] = {
     ".mpg",
     ".mpeg",
 }
+
+
+@dataclass(frozen=True)
+class SparseModelStats:
+    path: Path
+    camera_count: int
+    registered_image_count: int
+    point_count: int
 
 
 def parse_args():
@@ -78,6 +88,110 @@ def run_command(command: Sequence[str], step_name: str) -> None:
     except subprocess.CalledProcessError as exc:
         logging.error("%s failed with code %s. Exiting.", step_name, exc.returncode)
         raise SystemExit(exc.returncode) from exc
+
+
+def read_binary_count(path: Path) -> int:
+    """读取 COLMAP 二进制模型文件头里的记录数."""
+    with path.open("rb") as handle:
+        raw_count = handle.read(8)
+
+    if len(raw_count) != 8:
+        raise ValueError(f"`{path}` is too small to contain a COLMAP record count.")
+
+    return struct.unpack("<Q", raw_count)[0]
+
+
+def count_non_comment_lines(path: Path) -> int:
+    count = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            stripped = raw_line.strip()
+            if stripped and not stripped.startswith("#"):
+                count += 1
+    return count
+
+
+def read_text_image_count(path: Path) -> int:
+    # `images.txt` 中每张图占两行:
+    # 第一行是位姿和文件名, 第二行是 2D 点列表.
+    return count_non_comment_lines(path) // 2
+
+
+def read_optional_model_count(model_path: Path, binary_name: str, text_name: str) -> int:
+    binary_path = model_path / binary_name
+    if binary_path.exists():
+        return read_binary_count(binary_path)
+
+    text_path = model_path / text_name
+    if not text_path.exists():
+        return 0
+
+    if text_name == "images.txt":
+        return read_text_image_count(text_path)
+
+    return count_non_comment_lines(text_path)
+
+
+def list_sparse_model_stats(sparse_root: Path) -> List[SparseModelStats]:
+    model_directories = sorted(path for path in sparse_root.iterdir() if path.is_dir())
+    if not model_directories:
+        logging.error("No COLMAP sparse models were found in `%s`.", sparse_root)
+        raise SystemExit(1)
+
+    stats: List[SparseModelStats] = []
+    for model_path in model_directories:
+        model_stats = SparseModelStats(
+            path=model_path,
+            camera_count=read_optional_model_count(model_path, "cameras.bin", "cameras.txt"),
+            registered_image_count=read_optional_model_count(model_path, "images.bin", "images.txt"),
+            point_count=read_optional_model_count(model_path, "points3D.bin", "points3D.txt"),
+        )
+        stats.append(model_stats)
+        logging.info(
+            "COLMAP sparse model `%s`: cameras=%s, registered_images=%s, points=%s",
+            model_path.name,
+            model_stats.camera_count,
+            model_stats.registered_image_count,
+            model_stats.point_count,
+        )
+
+    return stats
+
+
+def select_best_sparse_model(sparse_root: Path) -> SparseModelStats:
+    """为 undistort 选择最稳的 COLMAP sparse 子模型.
+
+    真实数据里 `mapper` 可能会产出多个子模型.
+    固定写死 `sparse/0` 会把“最先生成的模型”误当成“最好的模型”.
+    """
+    if not sparse_root.is_dir():
+        logging.error("Expected COLMAP sparse root at `%s`, but it does not exist.", sparse_root)
+        raise SystemExit(1)
+
+    sparse_models = list_sparse_model_stats(sparse_root)
+    best_model = max(
+        sparse_models,
+        key=lambda model: (
+            model.registered_image_count,
+            model.point_count,
+            model.camera_count,
+        ),
+    )
+
+    if best_model.registered_image_count <= 0:
+        logging.error(
+            "COLMAP mapper did not produce a usable sparse model in `%s`.",
+            sparse_root,
+        )
+        raise SystemExit(1)
+
+    logging.info(
+        "Selected COLMAP sparse model `%s` for undistortion (registered_images=%s, points=%s).",
+        best_model.path.name,
+        best_model.registered_image_count,
+        best_model.point_count,
+    )
+    return best_model
 
 
 def list_media_files(directory: Path, extensions: Set[str]) -> List[Path]:
@@ -387,6 +501,8 @@ def main() -> None:
             "mapper",
         )
 
+    selected_sparse_model = select_best_sparse_model(source_path / "distorted" / "sparse")
+
     run_command(
         [
             colmap_command,
@@ -394,7 +510,7 @@ def main() -> None:
             "--image_path",
             str(input_path),
             "--input_path",
-            str(source_path / "distorted" / "sparse" / "0"),
+            str(selected_sparse_model.path),
             "--output_path",
             str(source_path),
             "--output_type",
