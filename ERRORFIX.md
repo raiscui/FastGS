@@ -362,6 +362,49 @@
     - `Reading camera 360/360`
     - `Number of points at initialisation :  92946`
     - `Training complete.`
+
+## [2026-03-23 15:03:08 UTC] 错误名称: VerseCrafter wrapper 默认把 `ffmpeg` 命令名误当成路径, 且双卡失败信息不够早
+
+### 问题现象
+- 对新脚本执行:
+  - `bash scripts/run_versecrafter_flashvsr_fastgs.sh --source-path /workspace/VerseCrafter/demo_data/my4 --phase superres --dry-run --overwrite`
+- 最早暴露的错误是:
+  - `ERROR: 文件不存在: /workspace/FastGS/ffmpeg`
+- 修掉后继续做最小真实验证时, 还观察到:
+  - 第二个 FlashVSR shard 运行到中途才报:
+    - `RuntimeError: No CUDA GPUs are available`
+
+### 原因
+- 第一层原因:
+  - `scripts/run_versecrafter_flashvsr_fastgs.sh` 之前会无条件把 `FFMPEG_BIN` 做路径归一化
+  - 对默认值 `ffmpeg` 而言, 这会被误改成仓库内伪路径
+- 第二层原因:
+  - 旧脚本在真正分片前没有逐卡验证 local torch 环境是否能看到 CUDA
+  - 结果是 GPU 不可用时, 用户只能在某个 shard 的深层日志里才看到失败
+
+### 修复
+- 新增“仅当参数本身是显式路径时才归一化”的逻辑.
+- `COLMAP prepare` 阶段不再额外强塞 `CUDA_VISIBLE_DEVICES`, 避免 GPU index 与环境重映射歧义.
+- `train` 阶段在已有 `FASTGS_ROOT/images + sparse/0` 时, 不再强依赖 `PREPARED_ROOT`.
+- 对 local FlashVSR runner 新增逐卡预检:
+  - 在真正分片前执行:
+    - `CUDA_VISIBLE_DEVICES=<gpu_id> <local_python> -c 'import torch; ...'`
+  - 如果该卡不可用, 直接给出明确错误并停止
+
+### 验证
+- 静态验证:
+  - `bash -n scripts/run_versecrafter_flashvsr_fastgs.sh`
+  - `bash -n scripts/run_lyra_colmap_fastgs.sh`
+  - `pixi run python -m py_compile convert.py`
+- dry-run 验证:
+  - `bash scripts/run_versecrafter_flashvsr_fastgs.sh --source-path /workspace/VerseCrafter/demo_data/my4 --phase superres --dry-run --overwrite`
+  - 已成功完成 12 视频分片与汇总
+- 预检验证:
+  - `bash scripts/run_versecrafter_flashvsr_fastgs.sh --source-path /workspace/VerseCrafter/demo_data/my4 --scene-stem generated_video_0 --view-ids 0,1 --phase prepare --mode tiny --superres-gpu-ids 0,1 --colmap-gpu-index 0,1 --bridge-root /workspace/FastGS/data/my4_smoke_bridge --flashvsr-output-root /workspace/FastGS/data/my4_smoke_flashvsr --prepared-root /workspace/FastGS/data/my4_smoke_prepared --fastgs-root /workspace/FastGS/data/my4_smoke_fastgs --overwrite`
+  - 关键输出:
+    - `FlashVSR GPU 预检通过: gpu=0`
+    - `gpu=1 torch.cuda.is_available()=False device_count=1`
+    - `ERROR: FlashVSR local runner 当前无法使用 GPU 1`
 - 真实故障目录就地修复验证:
   - 先备份旧坏产物:
     - `images -> images_bad_20260315_0625`

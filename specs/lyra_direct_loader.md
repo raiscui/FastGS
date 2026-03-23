@@ -141,9 +141,30 @@ sequenceDiagram
     - `FlashVSR -> SR root -> direct/COLMAP -> FastGS train/render/metrics`
 - 该串联脚本支持直接传:
   - `--source-video "/path/to/<长中文文件名>.mp4"`
-- 对带空格、中文、逗号的 `scene_stem`, 当前做法是:
-  - 整体路径用引号包起来
-  - 由脚本自动反推 `source-path`、`scene-stem` 和完整 `view-ids`
+  - 对带空格、中文、逗号的 `scene_stem`, 当前做法是:
+    - 整体路径用引号包起来
+    - 由脚本自动反推 `source-path`、`scene-stem` 和完整 `view-ids`
+
+## VerseCrafter Wrapper
+
+- `scripts/run_versecrafter_flashvsr_fastgs.sh`
+  - 输入是 VerseCrafter 风格目录:
+    - `view_id/generated_videos/<scene>.mp4`
+  - 会先生成一个 bridge root:
+    - `view_id/{rgb,pose,intrinsics}`
+  - 其中 bridge root 里的 `pose/intrinsics` 只是占位文件:
+    - 只用于满足 FlashVSR wrapper 的目录完整性检查
+    - 不作为训练相机参数复用
+  - 真实训练链路固定为:
+    - `FlashVSR -> SR rgb root -> CUDA COLMAP -> FastGS`
+  - 设计意图:
+    - 当用户明确不想复用 VerseCrafter 自带相机参数时, 通过这条脚本仍可复用现有 FlashVSR / FastGS wrapper
+  - 双卡策略:
+    - 超分阶段把视频任务按 GPU 分片并发
+    - local runner 会在真正超分前逐卡预检 `torch.cuda.is_available()`
+    - 如果某张卡当前不可用, 脚本会直接失败并指明 GPU id
+    - COLMAP 准备阶段可显式透传 `--colmap-gpu-index 0,1`
+    - FastGS 训练 / 渲染阶段仍按单卡执行
 
 适用场景:
 - 如果目标是“最大化复用 Lyra 已知相机参数”, 用 direct loader.

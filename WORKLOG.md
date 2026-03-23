@@ -218,6 +218,39 @@
 - 把用户指定的 GPU 版 COLMAP 路径统一固化到文档里.
 
 ### 完成过程
+
+## [2026-03-23 15:03:08 UTC] 任务名称: 完成 VerseCrafter -> FlashVSR -> CUDA COLMAP -> FastGS 专用脚本
+
+### 任务内容
+- 新增并收尾 `scripts/run_versecrafter_flashvsr_fastgs.sh`, 让 VerseCrafter 输出目录能直接进入 FastGS 工作流.
+- 明确固定路线为:
+  - `FlashVSR -> CUDA COLMAP -> FastGS`
+- 明确不复用 VerseCrafter 自带相机参数.
+
+### 完成过程
+- 检查并补齐了 `scripts/run_versecrafter_flashvsr_fastgs.sh` 的阶段逻辑、双卡分片逻辑和 COLMAP 参数透传.
+- 在 `convert.py` 和 `scripts/run_lyra_colmap_fastgs.sh` 已有 GPU index 透传的基础上, 让 VerseCrafter wrapper 能继续把 `--colmap-gpu-index` 传到底层.
+- 修掉了一个真实脚本 bug:
+  - 默认 `ffmpeg` 命令名之前会被误拼成仓库内路径
+- 顺手补强了一个复用性问题:
+  - 当 `FASTGS_ROOT` 已经存在时, `train` 阶段不再强依赖 `PREPARED_ROOT`
+- 对新脚本做了两类验证:
+  - 静态:
+    - `bash -n scripts/run_versecrafter_flashvsr_fastgs.sh`
+    - `bash -n scripts/run_lyra_colmap_fastgs.sh`
+    - `pixi run python -m py_compile convert.py`
+  - 动态:
+    - 在真实 `my4` 上完成 `superres --dry-run`
+    - 对少量视角做最小真实 `prepare` 验证
+- 最后把“GPU1 当前对 torch / COLMAP 不可用”的事实转成脚本预检:
+  - local FlashVSR runner 现在会在分片前逐卡检查 CUDA 可用性
+
+### 总结感悟
+- 这次真正关键的不是“再多加一个 wrapper”, 而是把路径边界和环境边界说清楚:
+  - 哪些相机参数不用
+  - 哪些 GPU 参数只是透传
+  - 哪些阶段其实受限于当前机器环境
+- 对双卡脚本来说, 预检比事后看日志更重要. 用户要的是确定性, 不是跑到一半才知道第二张卡根本不可用.
 - 先重新核对 `data/s01` 的最新状态,确认 `C01pick` ~ `C06pick` 六个目录当前都已存在且各有 51 张图.
 - 对照 `scene/__init__.py`、`scene/dataset_readers.py` 与 `convert.py`,确认本仓库读取 COLMAP 数据的真实要求,并判断 `convert.py` 当前默认假设不适合多机位目录.
 - 新增 `docs/s01_3dgs_workflow.md`, 使用手动 COLMAP CLI 作为主线,统一定义 `COLMAP_BIN=/workspace/colmap-cuda-install-3.12.6/bin/colmap`.
@@ -720,3 +753,55 @@
 - COLMAP 的 `mapper` 会输出多个 sparse 子模型时, `sparse/0` 只代表“第一个”, 不代表“最好”.
 - 这类问题最容易被误判成训练 CUDA 崩溃, 但真正该修的往往是更上游的数据选择逻辑.
 - 这次不只是修了代码, 还把真实故障目录 `/workspace/FastGS/data/xhc_bai_flashvsr_colmap_fps12` 就地重建为正确的 `images/ + sparse/0/`, 这样用户手上的数据已经可以继续直接训练.
+
+## [2026-03-23 00:00:00 UTC] 任务名称: 为 VerseCrafter `my4` 提供“先超分再 FastGS”的高质量命令
+
+### 任务内容
+- 分析 `/workspace/VerseCrafter/demo_data/my4` 的真实结构.
+- 判断 FastGS 应该走 direct 还是 colmap.
+- 给出一套适合“先超分 12 个视频, 再生成 3DGS”的实际命令.
+
+### 完成过程
+- 回读了 FastGS 当前入口与规格:
+  - `README.md`
+  - `scripts/run_lyra_flashvsr_fastgs.sh`
+  - `scripts/run_lyra_fastgs.sh`
+  - `specs/lyra_direct_loader.md`
+- 检查了 `my4` 真实数据:
+  - 共 12 个视角目录
+  - 每个视角有 `generated_video_0.mp4`
+  - 每个视角有 `custom_camera_trajectory.npz`
+  - 共享目录有 `depth_intrinsics.npz`
+- 再回读 VerseCrafter Blender 导出代码, 确认:
+  - `custom_camera_trajectory.npz` 保存的是 `camera-to-world`
+- 做了一次最小动态验证:
+  - 临时把 VerseCrafter 目录转成 FastGS direct 可识别的 Lyra 风格输入
+  - 对 `scripts/run_lyra_flashvsr_fastgs.sh --phase superres --pipeline direct` 做 dry-run
+  - wrapper 成功识别并准备处理 12 个视频
+
+### 总结感悟
+- 对这种“外部生成器 + 已知相机轨迹”的数据, 最高质量路线往往不是先让 COLMAP 重新猜一遍, 而是优先复用生成器自己的轨迹.
+- 真正需要额外做的, 常常不是重写训练逻辑, 而只是补一层轻量目录转换, 把已有信息喂给现有稳定入口.
+
+## [2026-03-23 00:00:00 UTC] 任务名称: 回滚 VerseCrafter `my4` 的 direct 推荐, 切换为 colmap 稳定建议
+
+### 任务内容
+- 对刚才的 VerseCrafter `my4 -> FastGS direct` 判断做最小训练验证.
+- 根据新动态证据, 修正最终建议.
+
+### 完成过程
+- 使用修正后的像素内参重新生成临时 Lyra 风格输入:
+  - `/tmp/versecrafter_my4_fastgs_input`
+- 执行:
+  - `CUDA_VISIBLE_DEVICES=0 pixi run python train.py -s /tmp/versecrafter_my4_fastgs_input -m /tmp/versecrafter_my4_direct_smoke --iterations 1 -r 8 --eval`
+- 动态输出表明:
+  - direct loader 已成功读入 VerseCrafter 转换数据
+  - 初始化点云、训练/测试相机装载都已完成
+  - 但首轮 backward 报 `cudaErrorInvalidConfiguration`
+- 因此回滚上一结论:
+  - 不再把 direct 作为当前对用户的稳定推荐
+  - 最终改为建议 `FlashVSR -> COLMAP -> FastGS`
+
+### 总结感悟
+- 对新数据源的适配, “能读入”只是第一关.
+- 真正能不能推荐给用户, 还得至少让最小训练跑到更后面, 否则很容易把半通状态误判成可交付状态.

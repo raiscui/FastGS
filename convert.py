@@ -46,6 +46,12 @@ def parse_args():
     parser.add_argument("--source_path", "-s", required=True, type=str)
     parser.add_argument("--camera", default="OPENCV", type=str)
     parser.add_argument("--colmap_executable", default="", type=str)
+    parser.add_argument(
+        "--colmap_gpu_index",
+        default="",
+        type=str,
+        help="Explicit GPU index list forwarded to COLMAP, e.g. `0` or `0,1`.",
+    )
     parser.add_argument("--resize", action="store_true")
     parser.add_argument("--magick_executable", default="", type=str)
 
@@ -435,6 +441,7 @@ def main() -> None:
     ffmpeg_command = args.ffmpeg_executable or "ffmpeg"
     magick_command = args.magick_executable or "magick"
     use_gpu = 0 if args.no_gpu else 1
+    colmap_gpu_index = args.colmap_gpu_index.strip()
 
     video_source = detect_video_source(source_path, args.video_path)
     if args.overwrite:
@@ -468,6 +475,14 @@ def main() -> None:
                 args.camera,
                 "--SiftExtraction.use_gpu",
                 str(use_gpu),
+                *(
+                    [
+                        "--SiftExtraction.gpu_index",
+                        colmap_gpu_index,
+                    ]
+                    if use_gpu and colmap_gpu_index
+                    else []
+                ),
             ],
             "feature extraction",
         )
@@ -480,6 +495,14 @@ def main() -> None:
                 str(source_path / "distorted" / "database.db"),
                 "--SiftMatching.use_gpu",
                 str(use_gpu),
+                *(
+                    [
+                        "--SiftMatching.gpu_index",
+                        colmap_gpu_index,
+                    ]
+                    if use_gpu and colmap_gpu_index
+                    else []
+                ),
             ],
             "feature matching",
         )

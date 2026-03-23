@@ -193,6 +193,39 @@
 
 ---
 
+# 任务计划: VerseCrafter 双卡超分 + CUDA COLMAP + FastGS 专用脚本
+
+## 目标
+- 为 `/workspace/VerseCrafter/demo_data/my4` 这类 VerseCrafter 输出目录提供一条稳定的一键链路.
+- 流程固定为 `FlashVSR 超分 -> CUDA COLMAP 解相机 -> FastGS 训练/评估`.
+- 明确不复用 VerseCrafter 自带相机参数.
+- 尽量利用双显卡, 重点放在超分分片并发与 COLMAP GPU index 透传.
+
+## 两种方向
+- 方案A(不惜代价,最佳): 修好并验证新的 VerseCrafter wrapper, 让用户直接用一个脚本覆盖 superres / prepare / train / evaluate / all.
+- 方案B(先能用,后面再优雅): 只给拼装命令, 暂不保证新脚本全链路可复用.
+
+## 阶段
+- [ ] 阶段1: 回读上下文并确认 direct 路线当前不作为推荐方案
+- [ ] 阶段2: 审核新 wrapper 与相关脚本的静态逻辑
+- [ ] 阶段3: 修复脚本问题并补齐 GPU 透传细节
+- [ ] 阶段4: 做 shell / Python 静态校验与最小 dry-run
+- [ ] 阶段5: 给出最终命令和使用说明
+
+## 关键问题
+1. 新脚本是否真的完全绕开了 VerseCrafter 自带相机参数?
+2. 双卡是否被合理利用在最耗时的超分与 COLMAP 阶段?
+3. 新脚本的阶段切分是否和现有 `run_lyra_*` wrapper 兼容?
+4. 当前仓库现实边界下, 哪些阶段仍然只能单卡执行?
+
+## 状态
+**目前在阶段2**
+- 2026-03-23 14:53:58 UTC: 已根据历史验证结论确认, `my4` 当前不再推荐 direct 路线.
+- 2026-03-23 14:53:58 UTC: 已回读 `task_plan.md`、`EPIPHANY_LOG.md`、`WORKLOG.md`、`LATER_PLANS.md`, 并重新阅读新加的 VerseCrafter wrapper 与 COLMAP 脚本入口.
+- 2026-03-23 14:53:58 UTC: 下一步先完整检查 `scripts/run_versecrafter_flashvsr_fastgs.sh` 的剩余逻辑, 再做语法验证和必要修复.
+
+---
+
 # 任务计划: 为 Lyra direct loader 补一键训练脚本
 
 ## 目标
@@ -746,3 +779,170 @@
     - `Reading camera 360/360`
     - `Number of points at initialisation : 92946`
     - `Training complete.`
+
+---
+
+# 任务计划: 为 VerseCrafter `my4` 提供“先超分再 FastGS 生成 3DGS”的合适命令
+
+## 目标
+- 基于 `/workspace/VerseCrafter/demo_data/my4` 的 12 路视频, 给出一套真实可执行的命令.
+- 优先选择“质量最高且与现有仓库最匹配”的路线.
+- 明确区分已观察到的事实、当前推断和最终建议.
+
+## 阶段
+- [x] 阶段1: 回读六文件与现有脚本, 确认 FastGS 可用入口
+- [x] 阶段2: 检查 `my4` 真实目录结构与相机数据形状
+- [ ] 阶段3: 判断应走 direct 还是 colmap
+- [ ] 阶段4: 做一次最小 dry-run 验证命令拼装
+- [ ] 阶段5: 汇总最终命令与注意事项
+
+## 关键问题
+1. `my4` 是否已经是 FastGS 可直接消费的 Lyra 风格根目录?
+2. VerseCrafter 的 `custom_camera_trajectory.npz` 语义是否与 FastGS direct loader 兼容?
+3. “最高质量”在当前仓库里, 应优先理解为复用已知相机轨迹, 还是重跑 COLMAP?
+
+## 状态
+**目前在阶段3**
+- 2026-03-23 00:00:00 UTC: 已观察到的事实:
+  - `/workspace/VerseCrafter/demo_data/my4` 下存在 `0..11` 共 12 个视角目录.
+  - 每个视角目录都包含 `generated_videos/generated_video_0.mp4`.
+  - 每个视角目录都包含 `custom_camera_trajectory.npz`, 其中 `extrinsics.shape == (81, 4, 4)`.
+  - 共享目录存在 `shared/estimated_depth/depth_intrinsics.npz`, 其中 `intrinsic.shape == (3, 3)`.
+  - FastGS 现成 direct loader 需要的是 `view_id/{rgb,pose,intrinsics}` 结构, 并要求:
+    - `pose/*.npz` 含 `data:[T,4,4]` 与 `inds:[T]`
+    - `intrinsics/*.npz` 含 `data:[T,4]` 与 `inds:[T]`
+- 2026-03-23 00:00:00 UTC: 当前主假设:
+  - VerseCrafter 导出的相机轨迹与共享内参, 经过一次轻量格式转换后, 可以直接走 FastGS direct 路线.
+  - 对“最高质量”目标, 复用 VerseCrafter 已知轨迹通常比让 COLMAP 从生成视频里重新估计更稳.
+- 2026-03-23 00:00:00 UTC: 最强备选解释:
+  - 如果 VerseCrafter 的 `extrinsics` 坐标语义与 FastGS 不一致, 或 direct 路线对这类数据存在隐藏不兼容, 则应退回 `--pipeline colmap`.
+- 2026-03-23 00:00:00 UTC: 下一步:
+  - 读取 VerseCrafter 导出代码, 确认 `extrinsics` 是否为 `c2w`.
+  - 用临时转换根目录做一次 `--phase superres --dry-run` 验证命令拼装是否成立.
+
+## 进度更新
+- 2026-03-23 00:00:00 UTC: 阶段3 已完成:
+  - 已读取 `/workspace/VerseCrafter/blender_addon/operators.py`
+  - 其中导出逻辑明确把 `cam_obj.matrix_world` 作为 `camera-to-world in Blender` 写入 `custom_camera_trajectory.npz`
+  - 这与 FastGS direct loader 所需 `c2w` 语义一致
+- 2026-03-23 00:00:00 UTC: 阶段4 已完成:
+  - 已将真实 `my4` 数据临时转换为 `/tmp/versecrafter_my4_fastgs_input`
+  - 执行:
+    - `bash /workspace/FastGS/scripts/run_lyra_flashvsr_fastgs.sh --source-path /tmp/versecrafter_my4_fastgs_input --phase superres --pipeline direct --scene-stem generated_video_0 --view-ids 0,1,2,3,4,5,6,7,8,9,10,11 --flashvsr-output-root /tmp/versecrafter_my4_flashvsr --prepared-root /tmp/versecrafter_my4_prepared --model-path /tmp/versecrafter_my4_model --mode full --scale 2.0 --dtype bf16 --quality 10 --dry-run`
+  - 动态输出确认:
+    - wrapper 识别到 `12` 个视频
+    - 每个视角都成功拼出了 `full_scale2x/<view_id>/rgb/generated_video_0.mp4`
+    - summary 路径已正常生成
+
+## 当前待办
+- [x] 阶段1: 回读六文件与现有脚本, 确认 FastGS 可用入口
+- [x] 阶段2: 检查 `my4` 真实目录结构与相机数据形状
+- [x] 阶段3: 判断应走 direct 还是 colmap
+- [x] 阶段4: 做一次最小 dry-run 验证命令拼装
+- [x] 阶段5: 汇总最终命令与注意事项
+
+## 状态
+**目前已完成**
+- 2026-03-23 00:00:00 UTC: 当前建议的已验证结论是:
+  - 现象:
+    - `my4` 原始目录不是 FastGS 现成支持的输入结构
+    - 但它已经包含 12 路视频、逐帧相机轨迹和共享内参
+  - 判断:
+    - 先做一次轻量格式转换, 再走 `FlashVSR -> FastGS direct`, 比重跑 COLMAP 更符合“最高质量”目标
+  - 动态证据:
+    - 转换后的临时根目录已通过 `superres dry-run`
+    - wrapper 已确认会处理 12 个视频
+
+## 进度更新
+- 2026-03-23 00:00:00 UTC: 上一条“优先推荐 direct 路线”的主假设已被新动态证据推翻.
+  - 推翻证据:
+    - `CUDA_VISIBLE_DEVICES=0 pixi run python train.py -s /tmp/versecrafter_my4_fastgs_input -m /tmp/versecrafter_my4_direct_smoke --iterations 1 -r 8 --eval`
+    - 关键输出先后出现:
+      - `Found Lyra generated multi-view root, loading direct pose/intrinsics inputs!`
+      - `Generating focus-centered point cloud (100000) for Lyra generated scene`
+      - `Loading Training Cameras`
+      - `Loading Test Cameras`
+      - `Number of points at initialisation :  100000`
+    - 但随后首轮 backward 失败:
+      - `torch.AcceleratorError: CUDA error: invalid configuration argument`
+- 2026-03-23 00:00:00 UTC: 回滚后的当前结论:
+  - 已验证成立的部分:
+    - VerseCrafter -> Lyra 风格目录转换是通的
+    - wrapper 能识别 12 个视频
+    - direct loader 能成功读取转换后的 `pose/intrinsics`
+  - 尚未验证通过的部分:
+    - 这批 VerseCrafter 数据直接走 FastGS direct 训练的稳定性
+  - 因此对用户当前“先超分再生成 3DGS”的需求, 最稳妥推荐应改为:
+    - 先做同样的轻量目录转换
+    - 再走 `scripts/run_lyra_flashvsr_fastgs.sh --pipeline colmap`
+
+---
+
+# 任务计划: 新增 VerseCrafter 一键脚本, 内置转换并强制走 CUDA COLMAP
+
+## 目标
+- 新增一个脚本, 直接接受 `/workspace/VerseCrafter/demo_data/my4` 这类 VerseCrafter 输出目录.
+- 脚本内部完成“VerseCrafter -> Lyra 风格 bridge root”的转换.
+- 后续强制调用 `scripts/run_lyra_flashvsr_fastgs.sh --pipeline colmap`, 不复用 VerseCrafter 自带相机参数做训练.
+- 尽量利用双显卡, 至少让超分阶段能明确拿到两张卡的可见性或进行双卡分摊.
+
+## 阶段
+- [x] 阶段1: 回读现有 FastGS / VerseCrafter 入口与历史结论
+- [ ] 阶段2: 确认 FlashVSR 双卡利用方式
+- [ ] 阶段3: 设计新脚本参数与 bridge root 生成策略
+- [ ] 阶段4: 实现新脚本
+- [ ] 阶段5: 做 dry-run 与最小动态验证
+- [ ] 阶段6: 回写文档与六文件
+
+## 关键问题
+1. 新脚本是否应彻底禁止 `direct`, 避免用户误用 VerseCrafter 自带相机?
+2. FlashVSR 当前能否原生吃满双卡, 还是需要新脚本自己做双卡并发调度?
+3. bridge root 里的 `pose/intrinsics` 应该保留真实值、写占位值, 还是完全另起流程避开这套约束?
+
+## 状态
+**目前在阶段2**
+- 2026-03-23 00:00:00 UTC: 用户新增明确约束:
+  - “不要他这里的相机参数”
+  - “要 cuda colmap 算出来的”
+  - “要利用好双显卡”
+- 2026-03-23 00:00:00 UTC: 当前主假设:
+  - 新脚本应强制只支持 `colmap` 路线
+  - VerseCrafter 自带 `custom_camera_trajectory.npz` 不再作为训练输入语义使用
+  - 只在 bridge root 层面满足现有 wrapper 的目录完整性约束
+- 2026-03-23 00:00:00 UTC: 最强备选解释:
+  - 如果 FlashVSR 本体已经支持在单任务内自动使用多卡, 新脚本只需要正确设置 GPU 可见性
+  - 如果它没有, 则需要在脚本层把视频任务拆成两组并行跑
+
+## 进度更新
+- 2026-03-23 15:03:08 UTC: 阶段2-4 已完成:
+  - `scripts/run_versecrafter_flashvsr_fastgs.sh` 已完成静态检查
+  - `scripts/run_lyra_colmap_fastgs.sh` 与 `convert.py` 已完成静态检查
+  - `--phase superres --dry-run --overwrite` 已在真实 `my4` 上通过
+  - 已确认 12 个视频会按 `gpu=0` / `gpu=1` 分成两组 shard
+- 2026-03-23 15:03:08 UTC: 已修复两个真实脚本问题:
+  - 默认 `ffmpeg` 命令名被误当成相对路径归一化
+  - `train` 阶段在已有 `FASTGS_ROOT` 时, 仍不必要地强依赖 `PREPARED_ROOT`
+- 2026-03-23 15:03:08 UTC: 已补充新的运行期保护:
+  - local FlashVSR runner 现在会在真正开跑前逐卡预检 `torch.cuda.is_available()`
+  - 如果某张卡当前不可用, 脚本会在分片前直接失败并报明是哪张卡
+- 2026-03-23 15:03:08 UTC: 最小真实验证给出了新的环境结论:
+  - `gpu=0` 在 Lyra / FastGS 的 torch 环境下可用
+  - `gpu=1` 在 Lyra / FastGS 的 torch 环境下不可用
+  - `COLMAP --SiftExtraction.gpu_index 1` 也会报 `Cannot set device to 1`, 并回退到 device 0
+
+## 当前待办
+- [x] 阶段1: 回读现有 FastGS / VerseCrafter 入口与历史结论
+- [x] 阶段2: 确认 FlashVSR 双卡利用方式
+- [x] 阶段3: 设计新脚本参数与 bridge root 生成策略
+- [x] 阶段4: 实现新脚本
+- [x] 阶段5: 做 dry-run 与最小动态验证
+- [x] 阶段6: 回写文档与六文件
+
+## 状态
+**目前已完成**
+- 2026-03-23 15:03:08 UTC: VerseCrafter 专用 wrapper 已可用, 并且固定走:
+  - `FlashVSR -> CUDA COLMAP -> FastGS`
+  - 不复用 VerseCrafter 自带相机参数
+- 2026-03-23 15:03:08 UTC: 当前“不能马上吃满双卡”的限制已经被动态证据收敛为环境问题, 不是 wrapper 接线问题:
+  - `gpu0` 可用
+  - `gpu1` 对 torch / COLMAP 当前不可用

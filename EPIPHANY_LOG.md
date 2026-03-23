@@ -510,3 +510,84 @@
 
 ### 后续讨论入口
 - 如果后续还会接更多外部数据源, 最稳的做法是把“支持 UTF-8/空格文件名”视为基础兼容要求, 而不是个例补丁.
+
+## [2026-03-23 00:00:00 UTC] 主题: VerseCrafter 相机轨迹可被 direct loader 读入, 但训练稳定性仍未被证明
+
+### 发现来源
+- 在为 `/workspace/VerseCrafter/demo_data/my4` 设计“先超分再 FastGS”的命令时发现.
+- 先把 VerseCrafter 目录轻量转换成 `view_id/{rgb,pose,intrinsics}` 后, 做了 direct 路线最小 smoke train.
+
+### 核心问题
+- 当前问题不是“VerseCrafter 数据完全无法接入 FastGS”.
+- 新证据显示:
+  - direct loader 能识别这类目录
+  - `custom_camera_trajectory.npz` 也足以进入相机构建与初始化点云阶段
+- 但训练仍可能在首轮 backward 报:
+  - `cudaErrorInvalidConfiguration`
+
+### 为什么重要
+- 这意味着“能读入”不等于“能稳定训练”.
+- 如果以后团队只记住“VerseCrafter 目录能转成 Lyra 风格”, 很容易误以为 direct 路线已经可直接对外推荐.
+- 真正稳妥的口径应该更细:
+  - 目录适配已基本打通
+  - 训练稳定性还需要单独验证
+
+### 未来风险
+- 如果没有这条记录, 后续很可能重复走一遍:
+  - 看到 loader 成功读入
+  - 便过早把 direct 方案当成最终建议
+  - 最后在用户长跑训练时才暴露首轮 CUDA 崩溃
+
+### 当前结论
+- VerseCrafter -> Lyra 风格目录转换本身是可行的.
+- 对当前 `my4` 这类数据, 面向用户的稳定建议应优先:
+  - `FlashVSR -> COLMAP -> FastGS`
+- direct 路线应视为:
+  - 已到“接近可用, 但还需继续验证”的状态
+
+### 后续讨论入口
+- 如果后续要正式支持 VerseCrafter direct 训练, 建议先复用本次 `my4` 转换根目录做最小可证伪实验, 再定位首轮 backward 的真实触发条件.
+
+## [2026-03-23 15:03:08 UTC] 主题: 当前机器对 torch 和 CUDA COLMAP 实际只稳定暴露 1 张可用 GPU
+
+### 发现来源
+- 在给 VerseCrafter wrapper 做“双卡超分 + CUDA COLMAP”最小真实验证时发现.
+- 先跑了:
+  - `scripts/run_versecrafter_flashvsr_fastgs.sh --phase prepare --view-ids 0,1 --superres-gpu-ids 0,1`
+- 随后又分别做了 torch 与 COLMAP 的最小 GPU 探测.
+
+### 核心问题
+- 从 `nvidia-smi` 看, 机器表面上有 2 张 A800.
+- 但动态证据表明:
+  - `CUDA_VISIBLE_DEVICES=0` 下, torch 正常
+  - `CUDA_VISIBLE_DEVICES=1` 下, torch 返回:
+    - `torch.cuda.is_available() = False`
+  - `COLMAP --SiftExtraction.gpu_index 1` 也会报:
+    - `Cannot set device to 1`
+- 这说明“系统有两张卡”不等于“当前运行环境真的能把两张卡都交给训练与 SfM 使用”.
+
+### 为什么重要
+- 以后凡是用户提“双卡”“多卡”时, 如果只看 `nvidia-smi` 和硬件数量, 很容易误判脚本能力.
+- 实际上这类问题可能根本不是脚本 bug, 而是:
+  - 驱动 / 容器 / 权限 / 可见性映射
+  - 让应用层只看到 1 张真正可用的 CUDA 设备
+
+### 未来风险
+- 如果不把这条规律记下来, 后面很可能反复发生:
+  - 用户要求双卡
+  - wrapper 按两张卡分片
+  - 运行到中途才在某个 shard 里报 `No CUDA GPUs are available`
+- 这种失败会被误解成:
+  - FlashVSR 崩了
+  - torch 崩了
+  - 或新 wrapper 接线错了
+
+### 当前结论
+- 当前机器层面, 面向 torch / CUDA COLMAP 的可用 GPU 实际只有 1 张.
+- VerseCrafter wrapper 的脚本接线已经没问题.
+- 因此“现在不能真正双卡跑完”应归因于环境可见性, 不是脚本逻辑.
+
+### 后续讨论入口
+- 如果后续真的要把这台机子恢复到可用双卡, 建议优先单独排查:
+  - `CUDA_VISIBLE_DEVICES=1` 为什么对 torch 不可用
+  - `COLMAP` 为什么只能看到 1 个可设设备

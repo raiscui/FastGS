@@ -29,6 +29,7 @@ FFMPEG_BIN="ffmpeg"
 CAMERA_MODEL="SIMPLE_PINHOLE"
 VIDEO_FPS=24
 USE_GPU=1
+COLMAP_GPU_INDEX=""
 
 RESOLUTION=1
 ITERATIONS=30000
@@ -86,6 +87,11 @@ usage() {
        --video-fps 24 \
        --camera-model SIMPLE_PINHOLE
 
+  6) 显式指定 CUDA COLMAP 使用哪几张卡:
+     bash scripts/run_lyra_colmap_fastgs.sh \
+       --phase prepare \
+       --colmap-gpu-index 0,1
+
 选项:
   --phase <prepare|train|render|metrics|evaluate|all>
                                 执行阶段, 默认 prepare
@@ -98,6 +104,7 @@ usage() {
   --ffmpeg-bin <path>           ffmpeg 可执行文件
   --camera-model <name>         COLMAP 相机模型, 默认 SIMPLE_PINHOLE
   --video-fps <x>               抽帧帧率, 默认 24
+  --colmap-gpu-index <csv>      透传给 COLMAP 的 GPU index, 例如 0 或 0,1
   --no-gpu                      让 convert.py / COLMAP 走 CPU
   -r, --resolution <1|2|4|8|宽度> 训练分辨率, 默认 1
   --iterations <n>              训练迭代数, 默认 30000
@@ -262,6 +269,8 @@ prepare_dataset() {
 
   if (( USE_GPU == 0 )); then
     convert_cmd+=(--no_gpu)
+  elif [[ -n "$COLMAP_GPU_INDEX" ]]; then
+    convert_cmd+=(--colmap_gpu_index "$COLMAP_GPU_INDEX")
   fi
 
   if (( OVERWRITE )); then
@@ -277,6 +286,9 @@ prepare_dataset() {
   log "COLMAP camera model: $CAMERA_MODEL"
   log "Video fps: $VIDEO_FPS"
   log "Use GPU in convert.py: $USE_GPU"
+  if [[ -n "$COLMAP_GPU_INDEX" ]]; then
+    log "COLMAP GPU index: $COLMAP_GPU_INDEX"
+  fi
 
   run_cmd "${convert_cmd[@]}"
   require_prepared_dataset
@@ -409,6 +421,10 @@ while (( $# > 0 )); do
       VIDEO_FPS="$2"
       shift 2
       ;;
+    --colmap-gpu-index)
+      COLMAP_GPU_INDEX="$2"
+      shift 2
+      ;;
     --no-gpu)
       USE_GPU=0
       shift
@@ -531,8 +547,17 @@ fi
 
 if [[ "$PHASE" == "prepare" || "$PHASE" == "all" ]]; then
   require_dir "$SOURCE_PATH"
-  require_cmd "$FFMPEG_BIN"
-  require_file "$COLMAP_BIN"
+  if [[ "$FFMPEG_BIN" == */* ]]; then
+    require_file "$FFMPEG_BIN"
+  else
+    require_cmd "$FFMPEG_BIN"
+  fi
+
+  if [[ "$COLMAP_BIN" == */* ]]; then
+    require_file "$COLMAP_BIN"
+  else
+    require_cmd "$COLMAP_BIN"
+  fi
 fi
 
 case "$PHASE" in

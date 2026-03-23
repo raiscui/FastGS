@@ -102,3 +102,11 @@
 - 这样在研究型实验里就能同时支持:
   - 默认自动选择
   - 人工指定某个特定子模型做对照
+
+## [2026-03-23 15:03:08 UTC] 排查当前机器的 GPU1 可见性
+- 这轮 VerseCrafter wrapper 验证已经证明:
+  - `CUDA_VISIBLE_DEVICES=1` 对 torch 不可用
+  - `COLMAP --SiftExtraction.gpu_index 1` 也无法真正选中 GPU1
+- 如果后续还要追求“超分双卡 + COLMAP 双卡”, 需要单独排查:
+  - 驱动 / 容器 / 权限 / CUDA 可见性映射
+  - 为什么 `nvidia-smi` 能看到 2 张卡, 但应用层只稳定可用 1 张

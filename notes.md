@@ -221,3 +221,210 @@
 - 最合理的修复方向:
   - 在 `convert.py` 里自动选择最佳 sparse 子模型
   - 默认优先注册图像数最多者, 点数作为次排序键
+
+## [2026-03-23 00:00:00 UTC] VerseCrafter `my4` 到 FastGS 的命令判断依据
+
+### 现象
+- `/workspace/VerseCrafter/demo_data/my4` 不是 FastGS 现成支持的 Lyra 风格目录.
+- 当前真实结构是:
+  - `view_id/generated_videos/generated_video_0.mp4`
+  - `view_id/custom_camera_trajectory.npz`
+  - `shared/estimated_depth/depth_intrinsics.npz`
+- 数据检查结果:
+  - 共 `0..11` 12 个视角目录
+  - `custom_camera_trajectory.npz` 只有键 `extrinsics`, 形状为 `(81, 4, 4)`
+  - `depth_intrinsics.npz` 里有 `intrinsic`, 形状为 `(3, 3)`
+
+### 假设
+- 主假设:
+  - VerseCrafter 这批数据更适合先轻量转成 FastGS direct loader 所需格式
+  - 然后走 `FlashVSR -> FastGS direct`
+  - 对“最高质量”目标, 复用已知相机轨迹通常比重新跑 COLMAP 更稳
+- 备选解释:
+  - 如果 VerseCrafter 导出的相机矩阵语义和 FastGS 不一致
+  - 或 direct loader 对这类目录仍有隐藏不兼容
+  - 则应该退回 `--pipeline colmap`
+
+### 静态证据
+- FastGS direct loader 输入要求, 来自:
+  - `specs/lyra_direct_loader.md`
+  - `scene/dataset_readers.py`
+- 其要求为:
+  - `pose/*.npz`
+    - `data:[T,4,4]`
+    - `inds:[T]`
+  - `intrinsics/*.npz`
+    - `data:[T,4]`
+    - `inds:[T]`
+- VerseCrafter Blender 导出代码 `blender_addon/operators.py` 明确写着:
+  - `cam_obj.matrix_world`
+  - 注释: `camera-to-world in Blender`
+  - 最终保存到 `custom_camera_trajectory.npz` 的 `extrinsics`
+- 这说明 `custom_camera_trajectory.npz` 的语义接近 FastGS 所需的 `c2w`
+
+### 推断
+- 可以把 VerseCrafter 数据做一次轻量转换:
+  - `generated_videos/generated_video_0.mp4` -> `rgb/generated_video_0.mp4`
+  - `extrinsics` -> `pose/generated_video_0.npz`
+  - 共享 `intrinsic` -> 每帧重复展开为 `[fx, fy, cx, cy]`, 写成 `intrinsics/generated_video_0.npz`
+- 这样就能直接复用 FastGS 已验证过的:
+  - `scripts/run_lyra_flashvsr_fastgs.sh`
+  - `--pipeline direct`
+
+### 待验证点
+- 还需要做一次 `--phase superres --dry-run` 动态验证
+- 目的是确认:
+  - 转换后的目录能被 wrapper 正确识别
+  - `scene_stem` / `view_ids` / 输出路径拼装都成立
+
+### 动态验证
+- 已用真实 `my4` 数据临时生成:
+  - `/tmp/versecrafter_my4_fastgs_input`
+- 该临时目录结构为:
+  - `view_id/rgb/generated_video_0.mp4` -> 指向 VerseCrafter 原视频的软链接
+  - `view_id/pose/generated_video_0.npz`
+  - `view_id/intrinsics/generated_video_0.npz`
+- 执行 dry-run:
+  - `bash /workspace/FastGS/scripts/run_lyra_flashvsr_fastgs.sh --source-path /tmp/versecrafter_my4_fastgs_input --phase superres --pipeline direct --scene-stem generated_video_0 --view-ids 0,1,2,3,4,5,6,7,8,9,10,11 --flashvsr-output-root /tmp/versecrafter_my4_flashvsr --prepared-root /tmp/versecrafter_my4_prepared --model-path /tmp/versecrafter_my4_model --mode full --scale 2.0 --dtype bf16 --quality 10 --dry-run`
+- 关键输出:
+  - `将处理 12 个视频。`
+  - 每个视角都成功映射到:
+    - `/tmp/versecrafter_my4_flashvsr/full_scale2x/<view_id>/rgb/generated_video_0.mp4`
+  - 汇总文件已写入:
+    - `/tmp/versecrafter_my4_flashvsr/flashvsr_reference_summary.json`
+
+### 当前结论
+- 上面的备选解释暂时没有被触发.
+- 目前最合适的对外建议是:
+  - 先把 VerseCrafter `my4` 转成 Lyra 风格输入
+  - 再走 `scripts/run_lyra_flashvsr_fastgs.sh --pipeline direct`
+  - 并用:
+    - `--mode full`
+    - `--scale 2.0`
+    - `--quality 10`
+    - `-r 1`
+    - `--iterations 30000`
+  - 作为“优先画质”的命令口径
+
+## [2026-03-23 00:00:00 UTC] 回滚记录: VerseCrafter `my4` 当前不应直接推荐 FastGS direct 训练
+
+### 新现象
+- 为了把前一条假设继续推进到动态证据, 执行了:
+  - `CUDA_VISIBLE_DEVICES=0 pixi run python train.py -s /tmp/versecrafter_my4_fastgs_input -m /tmp/versecrafter_my4_direct_smoke --iterations 1 -r 8 --eval`
+- 训练日志先成功进入:
+  - `Found Lyra generated multi-view root, loading direct pose/intrinsics inputs!`
+  - `Generating focus-centered point cloud (100000) for Lyra generated scene`
+  - `Loading Training Cameras`
+  - `Loading Test Cameras`
+  - `Number of points at initialisation :  100000`
+- 但随后首轮 backward 失败:
+  - `torch.AcceleratorError: CUDA error: invalid configuration argument`
+
+### 结论回滚
+- 上一条“推荐 direct 路线”不成立.
+- 推翻它的证据不是静态猜测, 而是最小训练动态验证.
+- 当前能确认的边界是:
+  - 目录转换没问题
+  - `pose/intrinsics` 语义至少足以让 direct loader 成功读入
+  - 但这批 VerseCrafter 数据在当前 FastGS 版本下, direct 训练还不稳定
+
+### 目前对用户的正确建议
+- 如果用户当前目标是:
+  - 先把 12 个视频超分
+  - 再稳定地产生一版 3DGS
+- 那当前推荐应切回:
+  - 先做同样的 Lyra 风格目录转换
+  - 再走 `scripts/run_lyra_flashvsr_fastgs.sh --pipeline colmap`
+
+## [2026-03-23 15:03:08 UTC] VerseCrafter wrapper 双卡与 CUDA COLMAP 验证记录
+
+### 现象
+- 用户新约束已经明确:
+  - 不使用 VerseCrafter 自带相机参数
+  - 要 CUDA COLMAP 自己解算
+  - 想尽量利用双显卡
+- 当前新脚本目标是:
+  - `scripts/run_versecrafter_flashvsr_fastgs.sh`
+  - 固定走 `FlashVSR -> CUDA COLMAP -> FastGS`
+
+### 假设
+- 主假设:
+  - 新 wrapper 的主要风险在脚本接线与 GPU 透传
+  - 只要 dry-run 和最小真实验证通过, 就能给用户稳定命令
+- 备选解释:
+  - 如果双卡在当前环境里并不都可见
+  - 那即便 wrapper 正确, 真实运行仍会在 FlashVSR 或 COLMAP 阶段暴露环境错误
+
+### 静态验证
+- 执行:
+  - `bash -n scripts/run_versecrafter_flashvsr_fastgs.sh`
+  - `bash -n scripts/run_lyra_colmap_fastgs.sh`
+  - `pixi run python -m py_compile convert.py`
+- 结果:
+  - 三项均通过
+- 新发现并已修复:
+  - `scripts/run_versecrafter_flashvsr_fastgs.sh` 之前会把默认 `ffmpeg` 命令名误归一化成:
+    - `/workspace/FastGS/ffmpeg`
+  - 现在只有显式路径才做归一化
+
+### dry-run 验证
+- 执行:
+  - `bash scripts/run_versecrafter_flashvsr_fastgs.sh --source-path /workspace/VerseCrafter/demo_data/my4 --phase superres --dry-run --overwrite`
+- 关键输出:
+  - `Scene stem: generated_video_0`
+  - `View ids: 0,1,10,11,2,3,4,5,6,7,8,9`
+  - `Video fps: 16`
+  - `启动超分分片: gpu=0 views=0,10,2,4,6,8`
+  - `启动超分分片: gpu=1 views=1,11,3,5,7,9`
+  - 两个 shard 都生成了各自 summary
+  - 最终汇总写到:
+    - `/workspace/FastGS/data/my4_generated_video_0_flashvsr_reference/flashvsr_reference_summary.json`
+
+### 最小真实验证
+- 执行:
+  - `bash scripts/run_versecrafter_flashvsr_fastgs.sh --source-path /workspace/VerseCrafter/demo_data/my4 --scene-stem generated_video_0 --view-ids 0,1 --phase prepare --mode tiny --scale 2.0 --superres-gpu-ids 0,1 --colmap-gpu-index 0,1 --bridge-root /workspace/FastGS/data/my4_smoke_bridge --flashvsr-output-root /workspace/FastGS/data/my4_smoke_flashvsr --prepared-root /workspace/FastGS/data/my4_smoke_prepared --fastgs-root /workspace/FastGS/data/my4_smoke_fastgs --overwrite`
+- 先观察到的事实:
+  - wrapper 确实把 `gpu=0` 和 `gpu=1` 两个 shard 启动起来了
+- 随后看到的失败:
+  - `view=1` 那个 FlashVSR 任务日志报:
+    - `[WARNING] CUDA not available, falling back to CPU`
+    - `RuntimeError: No CUDA GPUs are available`
+
+### 最小环境证据
+- Lyra / FlashVSR Python:
+  - `CUDA_VISIBLE_DEVICES=0 /workspace/lyra/.pixi/envs/default/bin/python3.10 -c 'import torch; ...'`
+    - 输出:
+      - `gpu0 True 1`
+      - `NVIDIA A800-SXM4-80GB`
+  - `CUDA_VISIBLE_DEVICES=1 /workspace/lyra/.pixi/envs/default/bin/python3.10 -c 'import torch; ...'`
+    - 输出:
+      - `gpu1 False 1`
+      - `NA`
+- FastGS pixi Python:
+  - `CUDA_VISIBLE_DEVICES=0 pixi run python -c 'import torch; ...'`
+    - 输出:
+      - `fastgs_gpu0 True 1`
+      - `NVIDIA A800-SXM4-80GB`
+  - `CUDA_VISIBLE_DEVICES=1 pixi run python -c 'import torch; ...'`
+    - 输出:
+      - `fastgs_gpu1 False 1`
+      - `NA`
+- CUDA COLMAP:
+  - 用 2 张真实图片执行:
+    - `/workspace/colmap-cuda-install-3.12.6/bin/colmap feature_extractor ... --SiftExtraction.use_gpu 1 --SiftExtraction.gpu_index 1`
+  - 关键输出:
+    - `ERROR:   Cannot set device to 1`
+    - `WARNING: Use # 0 device instead (out of 1)`
+
+### 结论
+- 上面的备选解释成立了.
+- 当前不能马上“吃满双卡”的原因已经被动态证据锁定为环境可见性问题, 不是 VerseCrafter wrapper 的命令拼接问题.
+- 当前仓库层面的稳定结论:
+  - wrapper 已经能正确:
+    - 识别 VerseCrafter 根目录
+    - 自动生成 bridge root
+    - 做 FlashVSR 分片
+    - 透传 CUDA COLMAP 参数
+  - 但当前机器实际只稳定暴露了 1 张可用 CUDA 设备给 torch / COLMAP
+- 这次为避免用户再踩黑盒报错, 已新增:
+  - local FlashVSR GPU 逐卡预检
