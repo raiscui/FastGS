@@ -1,3 +1,28 @@
+  bash /workspace/FastGS/scripts/run_versecrafter_flashvsr_fastgs.sh \
+    --source-path /workspace/VerseCrafter/demo_data/my4 \
+    --scene-stem generated_video_0 \
+    --phase all \
+    --mode full \
+    --scale 2.0 \
+    --dtype bf16 \
+    --quality 10 \
+    --video-fps 8 \
+    --superres-gpu-ids 0,1 \
+    --colmap-gpu-index 0,1 \
+    --train-gpu-id 0 \
+    --camera-model SIMPLE_PINHOLE \
+    -r 1 \
+    --iterations 50000 \
+    --overwrite
+
+  如果你后面把第 2 张卡修好了, 只要把这 3 个参数改回:
+
+  - --superres-gpu-ids 0,1
+  - --colmap-gpu-index 0,1
+  - --train-gpu-id 0
+
+
+
   bash /workspace/FastGS/scripts/run_lyra_flashvsr_fastgs.sh \
     --source-video "/workspace/lyra/assets/demo/static/diffusion_output_generated_xhc/0/rgb/xhc_in the style of Makoto Shinkai,注意镜头移动时候,镜头光斑,灯光光影的正常,不要贴在墙上.mp4" \
     --phase all \
