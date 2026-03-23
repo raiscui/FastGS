@@ -423,3 +423,37 @@
     - `Reading camera 360/360`
     - `Number of points at initialisation :  92946`
     - `Training complete.`
+
+## [2026-03-23 16:31:22 UTC] 错误名称: 收编 `FlashVSR` reference 模块后与 `FlashVSR-Pro/utils` 包撞名
+
+### 问题现象
+- 我把 lyra 里的实现先迁成了 `utils.flashvsr_reference`.
+- 随后执行真实 dry-run:
+  - `bash scripts/run_versecrafter_flashvsr_fastgs.sh --source-path /workspace/VerseCrafter/demo_data/my4 --phase superres --view-ids 0,1 --dry-run ...`
+- 结果失败:
+  - `ModuleNotFoundError: No module named 'einops'`
+- 调用栈显示 import 实际落到了:
+  - `/workspace/FlashVSR-Pro/utils/__init__.py`
+
+### 原因
+- wrapper 为了让 `infer.py` 工作, 会设置:
+  - `PYTHONPATH=/workspace/FlashVSR-Pro:/workspace/FastGS`
+- 在这个顺序下, `import utils.flashvsr_reference` 会先命中 `FlashVSR-Pro/utils`.
+- 这不是“新模块缺依赖”, 而是顶层包名 `utils` 与外仓重名.
+
+### 修复
+- 放弃使用 `utils.flashvsr_reference` 这个通用顶层名.
+- 改为:
+  - `scripts/flashvsr_reference_lib.py`
+  - `scripts/__init__.py`
+  - `from scripts.flashvsr_reference_lib import ...`
+
+### 验证
+- `pixi run python -m py_compile scripts/__init__.py scripts/flashvsr_reference_lib.py scripts/run_flashvsr_reference.py tests/test_flashvsr_reference.py`
+- `pixi run python -m unittest discover -s tests -p 'test_flashvsr_reference.py'`
+  - 结果: `Ran 9 tests ... OK`
+- `bash scripts/run_versecrafter_flashvsr_fastgs.sh --source-path /workspace/VerseCrafter/demo_data/my4 --phase superres --view-ids 0,1 --dry-run --bridge-root data/versecrafter_bridge_migrate_smoke --flashvsr-output-root data/versecrafter_flashvsr_migrate_smoke --overwrite`
+  - 结果: 通过
+  - 关键输出:
+    - `执行: ... /workspace/FastGS/scripts/run_flashvsr_reference.py ...`
+    - `status=succeeded`

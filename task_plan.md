@@ -946,3 +946,55 @@
 - 2026-03-23 15:03:08 UTC: 当前“不能马上吃满双卡”的限制已经被动态证据收敛为环境问题, 不是 wrapper 接线问题:
   - `gpu0` 可用
   - `gpu1` 对 torch / COLMAP 当前不可用
+
+## 进度更新
+- 2026-03-23 15:10:00 UTC: 用户继续追问“为什么只能用 0, 明明有两张卡”.
+- 2026-03-23 15:10:00 UTC: 当前进入新的最小环境排障子任务:
+  - 不再停留在“脚本预检失败”表面
+  - 继续确认到底是:
+    - 驱动 / CUDA 初始化问题
+    - `/dev/nvidia*` 设备权限或 cgroup 放行问题
+    - 还是 GPU1 本身处于异常状态
+- 2026-03-23 15:10:00 UTC: 下一步会先采集:
+  - `torch.cuda.init()` 的具体异常
+  - `/dev/nvidia*` 设备节点与主次设备号
+  - `nvidia-smi -q` 中与 GPU1 相关的状态字段
+- 2026-03-23 15:36:50 UTC: 环境排障第一轮已完成:
+  - `nvidia-smi -L` 确认物理上确实有 2 张 A800
+  - `/dev/nvidia0` 和 `/dev/nvidia1` 设备节点都存在, 且权限不是主要矛盾
+  - `CUDA_VISIBLE_DEVICES=1` 下, `torch.cuda.init()` 明确报:
+    - `RuntimeError: No CUDA GPUs are available`
+  - `COLMAP --SiftExtraction.gpu_index 1` 也不能真正选中 GPU1
+  - `nvidia-smi -q` 还显示:
+    - GPU0 `MIG Mode: Enabled`
+    - GPU1 `MIG Mode: Disabled`
+- 2026-03-23 15:36:50 UTC: 当前已确认的结论是“CUDA 运行时当前无法初始化 GPU1”.
+  - 但“为什么不能初始化”的最终根因仍在候选阶段.
+  - 当前最可疑候选是:
+    - GPU0/GPU1 的 MIG 配置不一致
+  - 最强备选解释是:
+    - 容器 / cgroup / 驱动层的设备可见性异常
+
+---
+
+# 任务计划: 收编 `run_versecrafter_flashvsr_fastgs.sh` 依赖的 lyra 子脚本
+
+## 目标
+- 把 VerseCrafter wrapper 现在依赖的 lyra 子脚本迁回 FastGS 仓库内, 为后续删除 `../lyra` 做准备.
+
+## 阶段
+- [ ] 阶段1: 识别当前 lyra 子脚本与调用契约
+- [ ] 阶段2: 把必要脚本迁入 FastGS 并改本地引用
+- [ ] 阶段3: 做 shell 静态校验与最小运行验证
+
+## 状态
+**目前在阶段1**
+- 2026-03-23 16:15:49 UTC: 已完成六文件回读, 接下来先精确定位 `scripts/run_versecrafter_flashvsr_fastgs.sh` 依赖的 lyra 子脚本与参数接口.
+## 进度更新
+- 2026-03-23 16:31:22 UTC: 阶段1-3 已完成:
+  - 已把 `run_flashvsr_reference.py` 与实现库收编到 FastGS 本仓库.
+  - `run_lyra_flashvsr_reference.sh` 与 `run_versecrafter_flashvsr_fastgs.sh` 已改为调用本地 Python 入口, 不再依赖 `../lyra/scripts/run_flashvsr_reference.py`.
+  - `pixi.toml` / `environment.yml` 已补 `imageio` 与 `pillow`, 并新增 `test_flashvsr_reference.py` 回归测试.
+## 状态
+**目前已完成**
+- 2026-03-23 16:31:22 UTC: 已通过 `bash -n`, `pixi run python -m unittest discover -s tests -p 'test_flashvsr_reference.py'`, 以及 VerseCrafter `--phase superres --dry-run` 烟雾验证.

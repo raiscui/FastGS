@@ -17,6 +17,8 @@ metrics = "python metrics.py"
 [dependencies]
 python = "3.13.*"
 pip = "*"
+imageio = "*"
+pillow = "*"
 plyfile = "*"
 tqdm = "*"
 websockets = "*"

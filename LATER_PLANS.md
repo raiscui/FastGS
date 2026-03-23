@@ -110,3 +110,12 @@
 - 如果后续还要追求“超分双卡 + COLMAP 双卡”, 需要单独排查:
   - 驱动 / 容器 / 权限 / CUDA 可见性映射
   - 为什么 `nvidia-smi` 能看到 2 张卡, 但应用层只稳定可用 1 张
+
+## [2026-03-23 16:31:22 UTC] VerseCrafter / FlashVSR 的零配置 local runner
+- 这轮已经把 lyra 子脚本收编回 FastGS, 但 `FlashVSR-Pro` 真正执行 `infer.py` 的 local Python 运行时, 仍然需要独立的 FlashVSR 依赖环境.
+- 当前已落地的是:
+  - 本地 reference 脚本不再依赖 lyra
+  - local runner 会提前明确报缺少的模块
+- 后续若要做到“删掉 lyra 后, 不传任何 `--local-python` 也能直接本地超分”, 还需要二选一:
+  - 方案1: 为 `FlashVSR-Pro` 单独固化一个新环境路径, 并让 wrapper 自动探测
+  - 方案2: 把 `FlashVSR-Pro` 的运行依赖正式纳入 FastGS 自己的环境管理

@@ -428,3 +428,127 @@
   - 但当前机器实际只稳定暴露了 1 张可用 CUDA 设备给 torch / COLMAP
 - 这次为避免用户再踩黑盒报错, 已新增:
   - local FlashVSR GPU 逐卡预检
+
+## [2026-03-23 15:36:50 UTC] 为什么明明有两张卡, 但现在只能稳定用 GPU0
+
+### 现象
+- 用户质疑:
+  - 机器明明有两张卡, 为什么脚本只建议用 `0`
+- 先前已知现象:
+  - `CUDA_VISIBLE_DEVICES=1` 下, torch 返回不可用
+  - COLMAP 指定 GPU1 也无法真正用到 1 号卡
+
+### 最小验证
+- 物理 GPU 枚举:
+  - `nvidia-smi -L`
+  - 输出:
+    - `GPU 0: NVIDIA A800-SXM4-80GB`
+    - `GPU 1: NVIDIA A800-SXM4-80GB`
+- 设备节点:
+  - `ls -l /dev/nvidia*`
+  - 输出里同时存在:
+    - `/dev/nvidia0`
+    - `/dev/nvidia1`
+- torch 直接初始化 GPU1:
+  - `CUDA_VISIBLE_DEVICES=1 /workspace/lyra/.pixi/envs/default/bin/python3.10 - <<'PY' ... torch.cuda.init()`
+  - 关键输出:
+    - `is_available= False`
+    - `device_count= 1`
+    - `RuntimeError: No CUDA GPUs are available`
+- 驱动层状态:
+  - `nvidia-smi -q -i 0`
+    - `MIG Mode / Current : Enabled`
+  - `nvidia-smi -q -i 1`
+    - `MIG Mode / Current : Disabled`
+- CUDA COLMAP:
+  - `... colmap feature_extractor ... --SiftExtraction.gpu_index 1`
+  - 关键输出:
+    - `ERROR: Cannot set device to 1`
+    - `WARNING: Use # 0 device instead (out of 1)`
+
+### 已确认结论
+- “只有 0 能用”不是说机器只有一张卡.
+- 已确认的真实含义是:
+  - 驱动能枚举到两张物理卡
+  - 但当前 CUDA 应用运行时只能稳定初始化 GPU0
+  - GPU1 对 torch / COLMAP 当前都不可用
+
+### 候选根因
+- 主候选假设:
+  - 两张卡的 MIG 配置不一致, 当前环境不干净
+  - GPU0 是 `MIG Enabled`, GPU1 是 `MIG Disabled`
+  - 这是一条很可疑的异常信号
+- 最强备选解释:
+  - 容器 / cgroup / 运行时设备可见性映射异常
+  - 虽然 `/dev/nvidia1` 节点存在, 但 CUDA runtime 仍没法真正初始化它
+
+### 当前口径
+- 现在可以确定“症状发生在哪一层”:
+  - 不是 VerseCrafter wrapper
+  - 不是 FlashVSR 命令拼接
+  - 而是更底层的 CUDA 初始化
+- 但还不能把“MIG 不一致”直接写成已确认根因
+
+## [2026-03-23 16:15:49 UTC] VerseCrafter wrapper 收编 lyra 子脚本
+
+### 当前目标
+- 用户要求把 `scripts/run_versecrafter_flashvsr_fastgs.sh` 依赖的 lyra 子脚本迁回 FastGS.
+- 背景约束是 `../lyra` 目录即将删除, 不能再让核心流程依赖外仓脚本.
+
+### 当前假设
+- 主假设:
+  - VerseCrafter wrapper 并不是直接依赖整套 lyra 业务逻辑.
+  - 更可能只依赖少数 shell / Python 子脚本, 以及它们约定的输入输出目录.
+- 备选解释:
+  - 也可能存在“脚本 A 调脚本 B, B 再调 lyra Python 模块”的隐式依赖.
+  - 如果是这种情况, 迁移就不能只复制入口脚本, 还要一并收编实现文件.
+
+### 下一步
+- 先读完整个 `scripts/run_versecrafter_flashvsr_fastgs.sh`.
+- 再把所有 `lyra` 路径引用和实际被调用的脚本列成清单.
+
+## [2026-03-23 16:31:22 UTC] `run_versecrafter_flashvsr_fastgs.sh` 收编 lyra 子脚本
+
+### 现象
+- `run_versecrafter_flashvsr_fastgs.sh` 自己不直接执行 `../lyra/scripts/*.sh`.
+- 真正的外仓依赖链是:
+  - `run_versecrafter_flashvsr_fastgs.sh`
+  - `run_lyra_flashvsr_reference.sh`
+  - `../lyra/scripts/run_flashvsr_reference.py`
+  - `../lyra/src/refinement_v2/flashvsr_reference.py`
+- 同时还存在两个隐藏绑定:
+  - 默认脚本 Python 指向 `../lyra/.pixi/envs/default/bin/python3`
+  - `PYTHONPATH` 里同时挂了 `FlashVSR-Pro` 与本仓库
+
+### 假设
+- 主假设:
+  - 只把 `run_flashvsr_reference.py` 搬过来还不够.
+  - 还必须一起解除默认 Python 对 `lyra` 的路径绑定.
+- 备选解释:
+  - 如果本地模块继续放在通用名 `utils.*`, 可能会被 `FlashVSR-Pro/utils` 抢走 import.
+
+### 最小验证
+- 静态搜索:
+  - `rg -n "lyra|run_lyra|flashvsr_reference" scripts/...`
+  - `ast-grep` 对 `"\"$REPO_ROOT/scripts/run_lyra_flashvsr_reference.sh\""` 的搜索确认了真实调用点.
+- 环境验证:
+  - `pixi run python` 初始缺少 `imageio`
+  - `FlashVSR-Pro/requirements.txt` 明确包含 `imageio==2.37.0`
+
+### 第一次实现后的新现象
+- 初版把模块收编成 `utils.flashvsr_reference`.
+- 真实 dry-run 命令失败:
+  - `ModuleNotFoundError: No module named 'einops'`
+- 调用栈显示实际 import 进入了:
+  - `/workspace/FlashVSR-Pro/utils/__init__.py`
+
+### 结论
+- 主假设成立, 且备选解释也被动态证据命中:
+  - 不仅要搬脚本
+  - 还要避免与 `FlashVSR-Pro` 的 `utils` 顶层包撞名
+- 最终修正为:
+  - 新增 `scripts/run_flashvsr_reference.py`
+  - 新增 `scripts/flashvsr_reference_lib.py`
+  - 新增 `scripts/__init__.py`
+  - shell wrapper 改用 `--script-python`
+  - `run_versecrafter_flashvsr_fastgs.sh` 不再要求 `../lyra` 存在

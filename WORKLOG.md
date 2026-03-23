@@ -805,3 +805,36 @@
 ### 总结感悟
 - 对新数据源的适配, “能读入”只是第一关.
 - 真正能不能推荐给用户, 还得至少让最小训练跑到更后面, 否则很容易把半通状态误判成可交付状态.
+
+## [2026-03-23 16:31:22 UTC] 任务名称: 收编 VerseCrafter wrapper 依赖的 lyra 子脚本
+
+### 任务内容
+- 把 `run_versecrafter_flashvsr_fastgs.sh` 间接依赖的 lyra Python 子脚本迁回 FastGS.
+- 清掉脚本默认值里对 `../lyra` 的硬绑定, 为后续删除 lyra 目录做准备.
+- 给收编后的本地脚本补最小回归测试和环境依赖.
+
+### 完成过程
+- 梳理真实调用链, 确认外仓依赖集中在:
+  - `../lyra/scripts/run_flashvsr_reference.py`
+  - `../lyra/src/refinement_v2/flashvsr_reference.py`
+- 新增本地文件:
+  - `scripts/run_flashvsr_reference.py`
+  - `scripts/flashvsr_reference_lib.py`
+  - `scripts/__init__.py`
+  - `tests/test_flashvsr_reference.py`
+- 修改 `scripts/run_lyra_flashvsr_reference.sh`:
+  - 默认改用 FastGS 自己的 pixi Python 运行本地 reference 脚本
+  - 新增 `--script-python`
+  - 保留 `--lyra-python` 作为兼容别名
+  - 只有在需要 legacy 默认输入/输出时才使用 `LYRA_ROOT`
+- 修改 `scripts/run_versecrafter_flashvsr_fastgs.sh`:
+  - 超分分片阶段改传 `--script-python`
+  - 移除对 `../lyra` 存在性的强依赖
+  - 保留 `--lyra-root` 作为兼容旧命令的空操作参数
+- 修改环境:
+  - `pixi.toml` / `environment.yml` 补 `imageio`、`pillow`
+  - `pixi.lock` 已同步更新
+
+### 总结感悟
+- 这种“把子脚本搬回仓库”的任务, 真正容易漏掉的不是文件本身, 而是默认解释器路径和 `PYTHONPATH` 顺序.
+- 当外部仓库也有 `utils` 这类通用顶层包名时, 本地新模块最好从第一天就用独立命名空间, 不然很容易出现“代码在, 但 import 到了别人家”的隐性故障.

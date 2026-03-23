@@ -13,6 +13,7 @@
     --camera-model SIMPLE_PINHOLE \
     -r 1 \
     --iterations 50000 \
+    --local-python <装好 FlashVSR 依赖的 python> \
     --overwrite
 
   如果你后面把第 2 张卡修好了, 只要把这 3 个参数改回:

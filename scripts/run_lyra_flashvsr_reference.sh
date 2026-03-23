@@ -6,7 +6,7 @@ set -euo pipefail
 # Lyra generated root -> FlashVSR-Pro external SR reference
 #
 # 这份脚本不直接做 FastGS 训练.
-# 它只是把 `lyra/scripts/run_flashvsr_reference.py`
+# 它只是把已经收编到 FastGS 的 `scripts/run_flashvsr_reference.py`
 # 包装成一个更短、更稳的入口.
 # ============================================================
 
@@ -15,7 +15,7 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 
 LYRA_ROOT="$REPO_ROOT/../lyra"
 FLASHVSR_REPO="$REPO_ROOT/../FlashVSR-Pro"
-LYRA_PYTHON=""
+SCRIPT_PYTHON=""
 LOCAL_PYTHON=""
 
 INPUT_ROOT=""
@@ -51,10 +51,11 @@ usage() {
   bash scripts/run_lyra_flashvsr_reference.sh [选项]
 
 默认行为:
-  - 调用 `/workspace/lyra/scripts/run_flashvsr_reference.py`
+  - 调用当前仓库内的 `scripts/run_flashvsr_reference.py`
   - 默认走当前机器可用的 `local` runner
   - 默认使用 `FlashVSR-Pro full + 2x + bf16 + quality 10`
-  - 默认输出到 `../lyra/outputs/flashvsr_reference`
+  - 如果存在 legacy `../lyra`, 默认输出仍沿用 `../lyra/outputs/flashvsr_reference`
+  - 如果 legacy `../lyra` 不存在, 默认输出回落到 `data/flashvsr_reference`
 
 输入根目录默认探测顺序:
   1. `../lyra/assets/demo/static/diffusion_output_generated`
@@ -95,10 +96,11 @@ usage() {
        --docker-image flashvsr-pro:latest
 
 选项:
-  --lyra-root <path>             Lyra 仓库根目录, 默认 ../lyra
+  --lyra-root <path>             legacy Lyra 根目录, 仅用于推导默认输入/输出
   --flashvsr-repo <path>         FlashVSR-Pro 仓库根目录, 默认 ../FlashVSR-Pro
-  --lyra-python <path>           执行 Lyra wrapper 的 Python, 默认 <lyra_root>/.pixi/envs/default/bin/python3
-  --local-python <path>          local runner 下执行 `infer.py` 的 Python, 默认与 --lyra-python 相同
+  --script-python <path>         执行本仓库 `run_flashvsr_reference.py` 的 Python
+  --lyra-python <path>           兼容旧参数, 等价于 --script-python
+  --local-python <path>          local runner 下执行 `infer.py` 的 Python, 默认与 --script-python 相同
   --input-root <path>            待超分的 Lyra generated root
   --source-video <path>          直接指定某个 rgb/*.mp4, 自动推导 root / scene_stem / view_ids
   --output-root <path>           SR reference 输出根目录, 默认 <lyra_root>/outputs/flashvsr_reference
@@ -129,11 +131,10 @@ usage() {
     - 脚本会自动推导 `input-root`
     - 脚本会自动推导 `scene-stem`
     - 如果没显式传 `--view-ids`, 会自动收集该 stem 在所有视角下都存在的 view ids
-  - relative 的 `--input-root` / `--output-root` 会相对 `--lyra-root` 解析.
-  - relative 的 `--flashvsr-repo` / `--lyra-root` / `--lyra-python` / `--local-python`
+  - relative 的 `--input-root` / `--output-root` 会优先相对 `--lyra-root` 解析.
+  - relative 的 `--flashvsr-repo` / `--lyra-root` / `--script-python` / `--local-python`
     会相对 FastGS 仓库根目录解析.
-  - 当前机器上旧文档里的 `/usr/local/miniconda3/envs/flashvsr/bin/python3` 已不存在.
-    默认会自动改用 `../lyra/.pixi/envs/default/bin/python3`.
+  - 如果没显式传 `--script-python`, 会优先使用 FastGS 自己的 pixi Python.
 EOF
 }
 
@@ -161,6 +162,19 @@ print(raw_path.resolve(strict=False))
 PY
 }
 
+normalize_binary_if_path() {
+  local base="$1"
+  local raw_value="$2"
+
+  if [[ "$raw_value" == */* || "$raw_value" == .* || "$raw_value" == ~* ]]; then
+    normalize_path "$base" "$raw_value"
+    return 0
+  fi
+
+  command -v "$raw_value" >/dev/null 2>&1 || fail "缺少命令: $raw_value"
+  command -v "$raw_value"
+}
+
 default_input_root() {
   local candidate_default="$LYRA_ROOT/assets/demo/static/diffusion_output_generated"
   local candidate_my="$LYRA_ROOT/assets/demo/static/diffusion_output_generated_my"
@@ -170,7 +184,33 @@ default_input_root() {
     return 0
   fi
 
-  printf '%s\n' "$candidate_my"
+  if [[ -d "$candidate_my" ]]; then
+    printf '%s\n' "$candidate_my"
+    return 0
+  fi
+
+  fail "未传 --input-root, 且没有找到 legacy Lyra 默认目录. 请显式传 --input-root 或 --source-video."
+}
+
+default_output_root() {
+  if [[ -d "$LYRA_ROOT" ]]; then
+    printf '%s\n' "$LYRA_ROOT/outputs/flashvsr_reference"
+    return 0
+  fi
+
+  printf '%s\n' "$REPO_ROOT/data/flashvsr_reference"
+}
+
+default_script_python() {
+  local pixi_python="$REPO_ROOT/.pixi/envs/default/bin/python"
+
+  if [[ -x "$pixi_python" ]]; then
+    printf '%s\n' "$pixi_python"
+    return 0
+  fi
+
+  command -v python3 >/dev/null 2>&1 || fail "找不到可用的 python3. 请先安装 Python, 或显式传 --script-python."
+  command -v python3
 }
 
 derive_source_video_context() {
@@ -303,7 +343,7 @@ PY
 }
 
 build_pythonpath() {
-  local combined="$FLASHVSR_REPO:$LYRA_ROOT"
+  local combined="$FLASHVSR_REPO:$REPO_ROOT"
 
   if [[ -n "${PYTHONPATH:-}" ]]; then
     combined="$combined:$PYTHONPATH"
@@ -328,6 +368,29 @@ build_ld_library_path() {
   printf '%s\n' "$combined"
 }
 
+validate_local_flashvsr_python() {
+  local python_bin="$1"
+  local env_pythonpath="$2"
+  local env_ld_library_path="$3"
+
+  env PYTHONPATH="$env_pythonpath" LD_LIBRARY_PATH="$env_ld_library_path" "$python_bin" - <<'PY'
+import importlib.util
+
+required_modules = [
+    "torch",
+    "einops",
+    "imageio",
+    "PIL",
+    "diffsynth",
+]
+missing_modules = [name for name in required_modules if importlib.util.find_spec(name) is None]
+if missing_modules:
+    raise SystemExit(
+        "missing python modules for FlashVSR local runner: " + ", ".join(missing_modules)
+    )
+PY
+}
+
 run_cmd() {
   log "执行: $*"
   "$@"
@@ -343,8 +406,8 @@ while (( $# > 0 )); do
       FLASHVSR_REPO="$2"
       shift 2
       ;;
-    --lyra-python)
-      LYRA_PYTHON="$2"
+    --script-python|--lyra-python)
+      SCRIPT_PYTHON="$2"
       shift 2
       ;;
     --local-python)
@@ -492,15 +555,15 @@ if [[ -n "$SOURCE_VIDEO" && -n "$INPUT_ROOT" ]]; then
   fail "--source-video 与 --input-root 不能同时使用"
 fi
 
-if [[ -z "$LYRA_PYTHON" ]]; then
-  LYRA_PYTHON="$LYRA_ROOT/.pixi/envs/default/bin/python3"
+if [[ -z "$SCRIPT_PYTHON" ]]; then
+  SCRIPT_PYTHON=$(default_script_python)
 fi
 if [[ -z "$LOCAL_PYTHON" ]]; then
-  LOCAL_PYTHON="$LYRA_PYTHON"
+  LOCAL_PYTHON="$SCRIPT_PYTHON"
 fi
 
-LYRA_PYTHON=$(normalize_path "$REPO_ROOT" "$LYRA_PYTHON")
-LOCAL_PYTHON=$(normalize_path "$REPO_ROOT" "$LOCAL_PYTHON")
+SCRIPT_PYTHON=$(normalize_binary_if_path "$REPO_ROOT" "$SCRIPT_PYTHON")
+LOCAL_PYTHON=$(normalize_binary_if_path "$REPO_ROOT" "$LOCAL_PYTHON")
 
 if [[ -n "$SOURCE_VIDEO" ]]; then
   SOURCE_VIDEO=$(normalize_path "$REPO_ROOT" "$SOURCE_VIDEO")
@@ -522,10 +585,18 @@ if [[ -n "$SOURCE_VIDEO" ]]; then
 elif [[ -z "$INPUT_ROOT" ]]; then
   INPUT_ROOT=$(default_input_root)
 else
-  INPUT_ROOT=$(normalize_path "$LYRA_ROOT" "$INPUT_ROOT")
+  if [[ -d "$LYRA_ROOT" ]]; then
+    INPUT_ROOT=$(normalize_path "$LYRA_ROOT" "$INPUT_ROOT")
+  else
+    INPUT_ROOT=$(normalize_path "$REPO_ROOT" "$INPUT_ROOT")
+  fi
 fi
 
-INPUT_ROOT=$(normalize_path "$LYRA_ROOT" "$INPUT_ROOT")
+if [[ -d "$LYRA_ROOT" ]]; then
+  INPUT_ROOT=$(normalize_path "$LYRA_ROOT" "$INPUT_ROOT")
+else
+  INPUT_ROOT=$(normalize_path "$REPO_ROOT" "$INPUT_ROOT")
+fi
 
 if [[ -n "$SCENE_STEM" ]]; then
   # 如果 scene stem 已知, 这里顺手把 view ids 归一化成“真实存在完整素材的那些视角”.
@@ -534,21 +605,24 @@ if [[ -n "$SCENE_STEM" ]]; then
 fi
 
 if [[ -z "$OUTPUT_ROOT" ]]; then
-  OUTPUT_ROOT="$LYRA_ROOT/outputs/flashvsr_reference"
+  OUTPUT_ROOT=$(default_output_root)
 else
-  OUTPUT_ROOT=$(normalize_path "$LYRA_ROOT" "$OUTPUT_ROOT")
+  if [[ -d "$LYRA_ROOT" ]]; then
+    OUTPUT_ROOT=$(normalize_path "$LYRA_ROOT" "$OUTPUT_ROOT")
+  else
+    OUTPUT_ROOT=$(normalize_path "$REPO_ROOT" "$OUTPUT_ROOT")
+  fi
 fi
 
-LYRA_SCRIPT="$LYRA_ROOT/scripts/run_flashvsr_reference.py"
+REFERENCE_SCRIPT="$REPO_ROOT/scripts/run_flashvsr_reference.py"
 
 require_cmd python3
-require_dir "$LYRA_ROOT"
 require_dir "$FLASHVSR_REPO"
-require_file "$LYRA_SCRIPT"
+require_file "$REFERENCE_SCRIPT"
 require_dir "$INPUT_ROOT"
-require_file "$LYRA_PYTHON"
+require_file "$SCRIPT_PYTHON"
 
-if [[ "$RUNNER" == "local" ]]; then
+if [[ "$RUNNER" == "local" && "$LOCAL_PYTHON" == */* ]]; then
   require_file "$LOCAL_PYTHON"
 fi
 
@@ -557,8 +631,8 @@ if [[ "$RUNNER" == "docker" ]]; then
 fi
 
 cmd=(
-  "$LYRA_PYTHON"
-  "$LYRA_SCRIPT"
+  "$SCRIPT_PYTHON"
+  "$REFERENCE_SCRIPT"
   --input-root "$INPUT_ROOT"
   --output-root "$OUTPUT_ROOT"
   --flashvsr-repo "$FLASHVSR_REPO"
@@ -613,11 +687,19 @@ if [[ "$RUNNER" == "local" ]]; then
   torch_lib_dir=$(find_torch_lib_dir "$LOCAL_PYTHON") || fail "未能从 $LOCAL_PYTHON 推断 torch/lib 路径"
   env_ld_library_path=$(build_ld_library_path "$LOCAL_PYTHON" "$torch_lib_dir")
   env_cmd+=("LD_LIBRARY_PATH=$env_ld_library_path")
+
+  # 这里先做一次依赖预检.
+  # 避免真正跑到 `infer.py` 时, 才因为缺少 `einops` / `diffsynth` 等依赖报模糊错误.
+  if (( DRY_RUN == 0 )); then
+    validate_local_flashvsr_python "$LOCAL_PYTHON" "$env_pythonpath" "$env_ld_library_path" || fail "当前 local Python 缺少 FlashVSR 依赖. 请传 --local-python 指向已安装 FlashVSR requirements 的解释器, 或改用 --runner docker."
+  fi
 fi
 
-log "Lyra root: $LYRA_ROOT"
 log "FlashVSR repo: $FLASHVSR_REPO"
-log "Lyra Python: $LYRA_PYTHON"
+if [[ -d "$LYRA_ROOT" ]]; then
+  log "Legacy Lyra root: $LYRA_ROOT"
+fi
+log "Reference script Python: $SCRIPT_PYTHON"
 if [[ "$RUNNER" == "local" ]]; then
   log "FlashVSR local Python: $LOCAL_PYTHON"
 fi

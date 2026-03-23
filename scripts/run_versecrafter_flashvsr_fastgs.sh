@@ -25,9 +25,8 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 VERSE_ROOT=""
 PHASE="prepare"
 
-LYRA_ROOT="$REPO_ROOT/../lyra"
 FLASHVSR_REPO="$REPO_ROOT/../FlashVSR-Pro"
-LYRA_PYTHON=""
+REFERENCE_PYTHON=""
 LOCAL_PYTHON=""
 PIXI_BIN="pixi"
 PYTHON_BIN="python3"
@@ -127,9 +126,10 @@ usage() {
   --source-path <path>          VerseCrafter 输出根目录
   --scene-stem <name>           目标视频 stem, 例如 generated_video_0
   --view-ids <csv>              指定视角, 例如 0,1,2,3
-  --lyra-root <path>            Lyra 仓库根目录
+  --lyra-root <path>            兼容旧参数, 已不再用于脚本内部依赖
   --flashvsr-repo <path>        FlashVSR-Pro 仓库根目录
-  --lyra-python <path>          Lyra wrapper 的 Python
+  --script-python <path>        运行本仓库 FlashVSR reference 子脚本的 Python
+  --lyra-python <path>          兼容旧参数, 等价于 --script-python
   --local-python <path>         local runner 的 Python
   --pixi-bin <path>             pixi 可执行文件
   --python-bin <path>           Python 可执行文件
@@ -217,13 +217,24 @@ normalize_binary_if_path() {
   local base="$1"
   local raw_value="$2"
 
-  # 命令名比如 `ffmpeg` / `colmap` 不能当成相对路径拼到仓库根目录下.
-  # 只有显式路径时, 才做路径归一化.
   if [[ "$raw_value" == */* || "$raw_value" == .* || "$raw_value" == ~* ]]; then
     normalize_path "$base" "$raw_value"
   else
-    printf '%s\n' "$raw_value"
+    command -v "$raw_value" >/dev/null 2>&1 || fail "缺少命令: $raw_value"
+    command -v "$raw_value"
   fi
+}
+
+default_reference_python() {
+  local pixi_python="$REPO_ROOT/.pixi/envs/default/bin/python"
+
+  if [[ -x "$pixi_python" ]]; then
+    printf '%s\n' "$pixi_python"
+    return 0
+  fi
+
+  command -v python3 >/dev/null 2>&1 || fail "找不到可用的 python3. 请先安装 Python, 或显式传 --script-python."
+  command -v python3
 }
 
 sanitize_tag() {
@@ -701,9 +712,8 @@ run_superres_shards() {
 
     local cmd=(
       bash "$REPO_ROOT/scripts/run_lyra_flashvsr_reference.sh"
-      --lyra-root "$LYRA_ROOT"
       --flashvsr-repo "$FLASHVSR_REPO"
-      --lyra-python "$LYRA_PYTHON"
+      --script-python "$REFERENCE_PYTHON"
       --output-root "$shard_output_root"
       --runner "$RUNNER"
       --mode "$MODE"
@@ -942,15 +952,16 @@ while (( $# > 0 )); do
       shift 2
       ;;
     --lyra-root)
-      LYRA_ROOT="$2"
+      # 兼容旧命令行.
+      # VerseCrafter wrapper 现在已经不再依赖 `../lyra`.
       shift 2
       ;;
     --flashvsr-repo)
       FLASHVSR_REPO="$2"
       shift 2
       ;;
-    --lyra-python)
-      LYRA_PYTHON="$2"
+    --script-python|--lyra-python)
+      REFERENCE_PYTHON="$2"
       shift 2
       ;;
     --local-python)
@@ -1217,7 +1228,6 @@ require_cmd python3
 require_cmd "$PYTHON_BIN"
 require_cmd "$PIXI_BIN"
 
-LYRA_ROOT=$(normalize_path "$REPO_ROOT" "$LYRA_ROOT")
 FLASHVSR_REPO=$(normalize_path "$REPO_ROOT" "$FLASHVSR_REPO")
 COLMAP_BIN=$(normalize_binary_if_path "$REPO_ROOT" "$COLMAP_BIN")
 FFMPEG_BIN=$(normalize_binary_if_path "$REPO_ROOT" "$FFMPEG_BIN")
@@ -1226,15 +1236,15 @@ if [[ "$FFPROBE_BIN" == */* ]]; then
   FFPROBE_BIN=$(normalize_path "$REPO_ROOT" "$FFPROBE_BIN")
 fi
 
-if [[ -z "$LYRA_PYTHON" ]]; then
-  LYRA_PYTHON="$LYRA_ROOT/.pixi/envs/default/bin/python3"
+if [[ -z "$REFERENCE_PYTHON" ]]; then
+  REFERENCE_PYTHON=$(default_reference_python)
 fi
 if [[ -z "$LOCAL_PYTHON" ]]; then
-  LOCAL_PYTHON="$LYRA_PYTHON"
+  LOCAL_PYTHON="$REFERENCE_PYTHON"
 fi
 
-LYRA_PYTHON=$(normalize_path "$REPO_ROOT" "$LYRA_PYTHON")
-LOCAL_PYTHON=$(normalize_path "$REPO_ROOT" "$LOCAL_PYTHON")
+REFERENCE_PYTHON=$(normalize_binary_if_path "$REPO_ROOT" "$REFERENCE_PYTHON")
+LOCAL_PYTHON=$(normalize_binary_if_path "$REPO_ROOT" "$LOCAL_PYTHON")
 
 if [[ -z "$VERSE_ROOT" ]]; then
   fail "必须传 --source-path 指向 VerseCrafter 输出根目录"
@@ -1242,10 +1252,9 @@ fi
 VERSE_ROOT=$(normalize_path "$REPO_ROOT" "$VERSE_ROOT")
 
 require_dir "$VERSE_ROOT"
-require_dir "$LYRA_ROOT"
 require_dir "$FLASHVSR_REPO"
-require_file "$LYRA_PYTHON"
-if [[ "$RUNNER" == "local" ]]; then
+require_file "$REFERENCE_PYTHON"
+if [[ "$RUNNER" == "local" && "$LOCAL_PYTHON" == */* ]]; then
   require_file "$LOCAL_PYTHON"
 fi
 
