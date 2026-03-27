@@ -91,7 +91,7 @@ def _resolve_mask_root(scene_root, mask_dir):
 
     规则尽量简单:
     - 显式传了 `mask_dir` 时,相对路径按 `scene_root` 解释.
-    - 未显式传参时,若 `<scene_root>/masks` 存在, 自动启用.
+    - 未显式传参时,若 `<scene_root>/masks` 存在且非空, 自动启用.
     - 否则返回 `None`, 表示当前场景不使用 mask.
     """
 
@@ -105,7 +105,7 @@ def _resolve_mask_root(scene_root, mask_dir):
         return candidate
 
     auto_candidate = (Path(scene_root) / "masks").resolve()
-    if auto_candidate.is_dir():
+    if auto_candidate.is_dir() and any(path.is_file() for path in auto_candidate.iterdir()):
         return auto_candidate
 
     return None

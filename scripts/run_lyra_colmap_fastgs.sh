@@ -128,7 +128,7 @@ usage() {
   --source-path <path>          Lyra 原始视频根目录, 或已准备好的 COLMAP / FastGS 根目录
   --fastgs-root <path>          COLMAP / FastGS 数据目录
   --model-path <path>           训练输出目录
-  --mask-dir <path>             训练 mask 目录, 默认自动识别 <fastgs-root>/masks 或 <source>/masks
+  --mask-dir <path>             训练 mask 目录. 如不传, 仅自动识别已有且非空的 masks 目录
   --start-checkpoint <path>     从已有 checkpoint 继续训练
   --python-bin <path>           Python 可执行文件, 默认 python3
   --pixi-bin <path>             pixi 可执行文件, 默认 pixi
@@ -168,8 +168,8 @@ usage() {
   - 默认 `--video-fps 24`, 是为了尽量接近 Lyra 原视频的 121 帧长度.
   - 对 synthetic / generated 数据, 当前默认 `SIMPLE_PINHOLE` 更稳.
   - 如果 `--source-path` 已经包含 `images/` 和 `sparse/0/`, `prepare` 阶段会退化为数据校验, 不再重复跑 `convert.py`.
-  - 如果 `--mask-dir` 为空, 训练阶段会优先尝试读取 `<fastgs-root>/masks`, 再回退到 `<source-path>/masks`.
-  - 对 `generated_videos + rendering_4D_maps/merged_mask.mp4` 这类目录, `prepare` 阶段会自动把 mask 视频抽成 `<fastgs-root>/masks`.
+  - 如果 `--mask-dir` 为空, 训练阶段只会尝试读取已有且非空的 `<fastgs-root>/masks` 或 `<source-path>/masks`.
+  - `prepare` 阶段当前只抽 RGB 帧, 不会把 `rendering_4D_maps/merged_mask.mp4` 自动转成训练 mask.
   - mask 文件需要与训练图同名, 或至少同 stem(扩展名可不同).
   - 如果传了 `--video-iterations`, 脚本会先确保这些迭代在训练期被保存成 point cloud / checkpoint.
   - `--phase all` 下若传了 `--video-iterations`, 会在训练结束后逐个 render 指定迭代, 并额外导出 mp4.
@@ -354,20 +354,32 @@ require_model_dir() {
   require_dir "$MODEL_PATH/point_cloud"
 }
 
+directory_has_files() {
+  local path="$1"
+
+  [[ -d "$path" ]] || return 1
+
+  while IFS= read -r _; do
+    return 0
+  done < <(find "$path" -maxdepth 1 -type f -print)
+
+  return 1
+}
+
 resolve_default_mask_dir() {
   if [[ -n "$MASK_DIR" ]]; then
     return 0
   fi
 
-  # 先接 prepare 阶段刚生成的 masks.
-  # 如果没有, 再回退到用户手工放在源目录下的静态 masks.
-  if [[ -d "$FASTGS_ROOT/masks" ]]; then
+  # 这里只接“现成且非空”的训练 mask 目录.
+  # 空目录不应该把训练误导进 mask 模式.
+  if directory_has_files "$FASTGS_ROOT/masks"; then
     MASK_DIR="$FASTGS_ROOT/masks"
     log "自动识别到训练 mask 目录: $MASK_DIR"
     return 0
   fi
 
-  if [[ -d "$SOURCE_PATH/masks" ]]; then
+  if directory_has_files "$SOURCE_PATH/masks"; then
     MASK_DIR="$SOURCE_PATH/masks"
     log "自动识别到训练 mask 目录: $MASK_DIR"
   fi

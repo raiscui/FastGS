@@ -97,8 +97,8 @@ class ConvertSparseModelSelectionTest(unittest.TestCase):
             ["0/generated_videos/generated_video_0.mp4"],
         )
 
-    def test_build_video_extraction_plans_attaches_generated_mask_video(self):
-        """VerseCrafter 风格目录应自动把 `merged_mask.mp4` 绑定到同视角 RGB 视频."""
+    def test_build_video_extraction_plans_ignore_generated_mask_video(self):
+        """`merged_mask.mp4` 当前不应再被当成训练 mask 入口."""
 
         generated_dir = self.root / "0" / "generated_videos"
         rendering_dir = self.root / "0" / "rendering_4D_maps"
@@ -106,18 +106,17 @@ class ConvertSparseModelSelectionTest(unittest.TestCase):
         rendering_dir.mkdir(parents=True, exist_ok=True)
 
         rgb_video = generated_dir / "generated_video_0.mp4"
-        mask_video = rendering_dir / "merged_mask.mp4"
         rgb_video.write_bytes(b"rgb")
-        mask_video.write_bytes(b"mask")
+        (rendering_dir / "merged_mask.mp4").write_bytes(b"mask")
 
         plans = build_video_extraction_plans(self.root, [rgb_video])
 
         self.assertEqual(len(plans), 1)
-        self.assertEqual(plans[0].mask_video_path, mask_video)
+        self.assertEqual(plans[0].video_path, rgb_video)
         self.assertEqual(plans[0].frame_prefix, "001_0_generated_videos_generated_video_0")
 
-    def test_build_video_extraction_plans_requires_full_mask_coverage(self):
-        """只给部分视角提供 `merged_mask.mp4` 时, 应立即失败."""
+    def test_build_video_extraction_plans_do_not_require_generated_mask_coverage(self):
+        """部分视角存在 `merged_mask.mp4` 时, 也不应影响 RGB 抽帧计划."""
 
         rgb_video_paths = []
         for view_id in ("0", "1"):
@@ -131,8 +130,16 @@ class ConvertSparseModelSelectionTest(unittest.TestCase):
         rendering_dir.mkdir(parents=True, exist_ok=True)
         (rendering_dir / "merged_mask.mp4").write_bytes(b"mask")
 
-        with self.assertRaises(SystemExit):
-            build_video_extraction_plans(self.root, rgb_video_paths)
+        plans = build_video_extraction_plans(self.root, rgb_video_paths)
+
+        self.assertEqual(len(plans), 2)
+        self.assertEqual(
+            [plan.frame_prefix for plan in plans],
+            [
+                "001_0_generated_videos_generated_video_0",
+                "002_1_generated_videos_generated_video_0",
+            ],
+        )
 
 
 if __name__ == "__main__":

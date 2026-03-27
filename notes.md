@@ -121,3 +121,82 @@
   - 多镜头生成视频目录识别
   - COLMAP 4.x CLI 兼容
 - 当前未完成项只剩“让真实 prepare 跑完并接正式训练”, 不再是代码路径不通.
+
+## [2026-03-27 10:20:15] [Session ID: 80800] 笔记: `merged_mask.mp4` 语义纠正后的处理判断
+
+## 来源
+
+### 来源1: 用户新增说明
+
+- 用户明确指出:
+  - `rendering_4D_maps/merged_mask.mp4` 是“非深度数据区域”的 mask.
+  - 它服务的是深度图链路, 不是普通训练 mask.
+
+### 来源2: 当前代码路径复核
+
+- `convert.py`
+  - `build_video_extraction_plans()` 会自动调用 `find_generated_mask_video()`.
+  - `prepare_input_directory()` 会把这类视频抽到 `<source_path>/masks`.
+- `scripts/run_lyra_colmap_fastgs.sh`
+  - 训练阶段会自动尝试识别 `<fastgs-root>/masks`.
+- `scene/dataset_readers.py`
+  - 即使 wrapper 不显式传 `--mask_dir`, 只要 `<scene_root>/masks` 存在, 仍会自动启用 mask.
+
+### 来源3: 动态状态
+
+- 后台 `prepare` 会话 `26742` 仍在 `exhaustive_matcher`.
+- 这意味着当前错误只落在“提前抽出了 `masks/`”, 还没有污染训练结果.
+
+## 综合发现
+
+### 现象
+
+- `merged_mask.mp4` 被自动抽成 `<fastgs-root>/masks` 后, 训练入口会把它当 alpha mask.
+- 这会改变 photometric loss 的有效区域.
+
+### 当前结论
+
+- 之前那条“自动把 `merged_mask.mp4` 当训练 mask”的结论已经被用户证据推翻.
+- 当前最正确的处理是:
+  - 取消默认自动接线
+  - 当前 `my5` 首轮训练按“无训练 mask”执行
+  - 等后续如果真的要做深度辅助, 再单独设计它的挂载位置, 不和 RGB 训练 mask 共用 `masks/` 语义
+
+## [2026-03-27 10:27:38] [Session ID: 80800] 笔记: 代码回滚与训练接力的验证结果
+
+## 来源
+
+### 来源1: 静态与单测验证
+
+- 已执行:
+  - `python3 -m py_compile convert.py scene/dataset_readers.py`
+  - `bash -n scripts/run_lyra_colmap_fastgs.sh`
+  - `pixi run python -m unittest tests.test_convert tests.test_mask_loading`
+- 结果:
+  - 全部通过
+  - 单测统计: `Ran 11 tests ... OK`
+
+### 来源2: 当前数据目录状态
+
+- `data/my5_colmap_fastgs` 当前可见目录:
+  - `distorted`
+  - `input`
+  - `depth_masks_from_merged_mask_20260327_102621`
+- 已把原 `masks/` 挪走.
+- 挪走后的深度辅助 mask 帧数量:
+  - `972`
+
+### 来源3: 后台进程状态
+
+- `prepare` 会话: `26742`
+  - 仍在 `exhaustive_matcher`
+- 训练等待器: `96836`
+  - 会在 `images + sparse/0` 就绪后自动起 `output/my5_nomask_v1`
+
+## 综合发现
+
+### 已验证结论
+
+- 当前仓库已经不再把 `merged_mask.mp4` 默认转换成训练 mask.
+- 空的 `masks/` 目录也不会再被自动探测成有效训练 mask 目录.
+- 当前 `my5` 数据根里的深度辅助 mask 已经被隔离出训练约定路径, 不会误伤首轮训练.

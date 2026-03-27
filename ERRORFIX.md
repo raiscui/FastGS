@@ -660,3 +660,36 @@
     - `feature_extractor` 使用 `--FeatureExtraction.use_gpu`
     - `exhaustive_matcher` 使用 `--FeatureMatching.use_gpu`
     - 当前已进入 COLMAP `exhaustive_matcher`
+
+## [2026-03-27 10:27:38 UTC] [Session ID: 80800] 错误名称: 把 `rendering_4D_maps/merged_mask.mp4` 误接成 FastGS 训练 mask
+
+### 问题现象
+- 在支持 `my5` 多镜头视频目录时, 我把 `generated_videos/generated_video_0.mp4` 同视角下的 `rendering_4D_maps/merged_mask.mp4` 自动抽成了 `<fastgs-root>/masks`.
+- 后续 wrapper 和 `scene/dataset_readers.py` 都会把这个目录识别成训练 mask 目录.
+- 这会让深度辅助 mask 误进入 RGB photometric loss.
+
+### 原因
+- 我之前把 `merged_mask.mp4` 的语义假设成了“普通训练 mask”.
+- 用户后来明确说明: 它其实是“非深度数据区域”的 mask, 用于深度图链路, 不是训练 alpha mask.
+- 错误不在 ffmpeg 或 COLMAP, 而在输入语义分类本身.
+
+### 修复
+- `convert.py`
+  - 撤掉 `merged_mask.mp4 -> masks/` 的默认自动接线.
+- `scene/dataset_readers.py`
+  - 自动 mask 探测改成“目录存在且非空”才启用.
+- `scripts/run_lyra_colmap_fastgs.sh`
+  - 自动 mask 识别同步改成只认已有且非空的目录.
+- 运行态数据处理:
+  - 将 `data/my5_colmap_fastgs/masks` 挪到 `data/my5_colmap_fastgs/depth_masks_from_merged_mask_20260327_102621`.
+
+### 验证
+- 静态验证:
+  - `python3 -m py_compile convert.py scene/dataset_readers.py`
+  - `bash -n scripts/run_lyra_colmap_fastgs.sh`
+- 回归测试:
+  - `pixi run python -m unittest tests.test_convert tests.test_mask_loading`
+  - 输出: `Ran 11 tests ... OK`
+- 动态状态:
+  - 真实 `prepare` 会话 `26742` 仍在 COLMAP `exhaustive_matcher`, 说明修复发生在训练启动前.
+  - 无 mask 训练等待器 `96836` 已启动, 会在 `prepare` 完成后自动接棒.

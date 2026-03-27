@@ -11,7 +11,7 @@ from unittest import mock
 import numpy as np
 from PIL import Image
 
-from scene.dataset_readers import CameraInfo, readColmapCameras
+from scene.dataset_readers import CameraInfo, _resolve_mask_root, readColmapCameras
 from utils.camera_utils import loadCam
 
 
@@ -107,6 +107,23 @@ class MaskLoadingTest(unittest.TestCase):
 
         with self.assertRaises(FileNotFoundError):
             readColmapCameras(extrinsics, intrinsics, str(images_dir), mask_root=masks_dir)
+
+    def test_resolve_mask_root_ignores_empty_auto_mask_dir(self) -> None:
+        """自动探测遇到空 `masks/` 目录时, 不应误进 mask 模式."""
+
+        masks_dir = self.root / "masks"
+        masks_dir.mkdir()
+
+        self.assertIsNone(_resolve_mask_root(self.root, ""))
+
+    def test_resolve_mask_root_accepts_nonempty_auto_mask_dir(self) -> None:
+        """只有非空自动 mask 目录才应该被启用."""
+
+        masks_dir = self.root / "masks"
+        masks_dir.mkdir()
+        Image.new("L", (4, 4), 255).save(masks_dir / "frame.png")
+
+        self.assertEqual(_resolve_mask_root(self.root, ""), masks_dir.resolve())
 
 
 if __name__ == "__main__":

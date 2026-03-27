@@ -99,3 +99,59 @@
 ### 当前状态
 - [x] 阶段4: 已有真实动态证据证明 prepare 主链路正在正常推进
 - [ ] 阶段5: 正在等待 COLMAP 完成后自动进入正式训练
+
+## [2026-03-27 10:20:15] [Session ID: 80800] [记录类型]: 用户纠正 `merged_mask.mp4` 语义后重订执行口径
+
+### 新现象
+- 用户明确说明: `rendering_4D_maps/merged_mask.mp4` 是“非深度数据区域”的 mask.
+- 这个 mask 是给深度图链路用的, 不是 RGB / photometric 训练 mask.
+- 当前后台 `prepare` 仍停留在 COLMAP `exhaustive_matcher`, 还没有进入 FastGS 训练.
+
+### 当前主假设
+- 之前把 `merged_mask.mp4` 自动抽成 `<fastgs-root>/masks` 的逻辑, 会把“深度辅助 mask”误接到训练 alpha mask 入口.
+- 这不是参数问题, 而是输入语义判断错了.
+
+### 备选解释
+- 也可能这份 `merged_mask.mp4` 在某些后续深度辅助流程里有价值.
+- 但就当前 FastGS 训练入口而言, 没有证据支持它应该接到 `--mask_dir` 或 `<scene_root>/masks`.
+
+### 最小验证与执行计划
+- [ ] 从默认代码路径里撤掉 `merged_mask.mp4 -> masks/` 的自动接线
+- [ ] 更新脚本帮助与回归测试, 明确当前 `my5` 首轮训练默认无 mask
+- [ ] 保留正在运行的 COLMAP prepare, 待其完成后清理错误生成的 `data/my5_colmap_fastgs/masks`
+- [ ] 按 `cmd.md` 的 `my4_mask_guarded_v4` 参数口径启动一轮“无训练 mask”的 `my5` 训练
+
+### 当前状态
+- 目前在“纠正 mask 语义并回滚默认行为”这个子步骤.
+- 接下来先改代码, 然后做静态与单测验证.
+
+## [2026-03-27 10:27:38] [Session ID: 80800] [记录类型]: 默认行为回滚已完成, 已接上无 mask 训练等待器
+
+### 进度更新
+- [x] 从默认代码路径里撤掉 `merged_mask.mp4 -> masks/` 的自动接线
+- [x] 更新脚本帮助与回归测试, 明确当前 `my5` 首轮训练默认无 mask
+- [x] 保留正在运行的 COLMAP prepare, 并把误生成的 `data/my5_colmap_fastgs/masks` 挪出训练语义目录
+- [ ] 按 `cmd.md` 的 `my4_mask_guarded_v4` 参数口径完成一轮“无训练 mask”的 `my5` 训练
+
+### 验证结果
+- 已通过:
+  - `python3 -m py_compile convert.py scene/dataset_readers.py`
+  - `bash -n scripts/run_lyra_colmap_fastgs.sh`
+  - `pixi run python -m unittest tests.test_convert tests.test_mask_loading`
+- 已执行的数据侧清理:
+  - `data/my5_colmap_fastgs/masks`
+  - -> `data/my5_colmap_fastgs/depth_masks_from_merged_mask_20260327_102621`
+  - 当前保留了 `972` 张深度辅助 mask 帧, 但已不在训练自动识别路径里
+
+### 后台任务
+- 真实 COLMAP prepare:
+  - 会话 `26742`
+  - 当前仍在 `exhaustive_matcher`
+- 无 mask 训练等待器:
+  - 会话 `96836`
+  - 待 `data/my5_colmap_fastgs/images` 与 `sparse/0` 就绪后, 自动启动:
+    - `output/my5_nomask_v1`
+
+### 当前状态
+- 目前主线阻塞点已经从“代码口径错误”切换成“等待 COLMAP 真实完成”.
+- 一旦 `prepare` 结束, 训练会自动接棒, 不再需要手动拼命令.
