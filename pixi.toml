@@ -9,7 +9,12 @@ version = "0.1.0"
 [tasks]
 # 这些本地 CUDA 扩展在 setup.py 里会 import torch,因此需要禁用 pip 的 build isolation,
 # 让它直接复用 pixi/conda 环境里的 torch.
-setup = "python -m pip install --no-build-isolation -e submodules/diff-gaussian-rasterization_fastgs -e submodules/simple-knn -e submodules/fused-ssim"
+setup = """bash -c '
+# 某些环境里, pixi/conda 链接出来的工具链文件会丢失执行位,先做一次幂等修正.
+find .pixi/envs/default/bin -maxdepth 1 -type f \\( -name "ninja" -o -name "x86_64-conda-linux-gnu-*" \\) ! -perm -111 -exec chmod +x {} + 2>/dev/null || true
+find .pixi/envs/default/libexec/gcc -type f ! -perm -111 -exec chmod +x {} + 2>/dev/null || true
+python -m pip install --no-build-isolation -e submodules/diff-gaussian-rasterization_fastgs -e submodules/simple-knn -e submodules/fused-ssim
+'"""
 train = "python train.py"
 render = "python render.py"
 metrics = "python metrics.py"
@@ -17,6 +22,8 @@ metrics = "python metrics.py"
 [dependencies]
 python = "3.13.*"
 pip = "*"
+# 使用 ninja 作为 PyTorch C++/CUDA 扩展的默认后端,避免回退到慢速 distutils.
+ninja = "*"
 imageio = "*"
 pillow = "*"
 plyfile = "*"
@@ -26,6 +33,12 @@ websockets = "*"
 [feature.cuda.dependencies]
 # CUDA 环境: 用于训练/渲染. 约束在 CUDA 12.x,避免解析到 CUDA 13.x 的新栈.
 cuda-version = "12.9.*"
+# 编译本地 CUDA 扩展时需要 `cuda_runtime.h` 等开发头文件.
+cuda-cudart-dev = "12.9.*"
+# 仅依赖 PyTorch GPU 包时拿到的是运行时与工具碎片,这里显式补完整的 nvcc 开发链路.
+cuda-nvcc = "12.9.*"
+# conda-forge 的 GCC 在本地开发环境里需要这份 specfile,否则会报 `could not find specs file conda.specs`.
+conda-gcc-specs = "14.3.*"
 pytorch-gpu = "2.9.1.*"
 torchvision = "0.24.1.*"
 torchaudio = "2.9.1.*"

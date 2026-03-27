@@ -155,7 +155,45 @@ bash scripts/run_lyra_colmap_fastgs.sh \
   --overwrite
 ```
 
-This wrapper only reads `rgb/*.mp4`, then runs:
+This wrapper can work in two modes:
+
+- raw video root:
+
+If your COLMAP scene has floating bright particles or indoor dust specks, you can first auto-generate per-image masks and then train FastGS with `--mask-dir`:
+
+```bash
+pixi run python scripts/generate_particle_masks.py \
+  --images-dir /home/rais/FreeFix/data/my4_fullcolmap/images \
+  --output-dir /home/rais/FreeFix/data/my4_fullcolmap/masks \
+  --debug-dir /home/rais/FreeFix/data/my4_fullcolmap/mask_debug_particle_v1 \
+  --summary-path /home/rais/FreeFix/data/my4_fullcolmap/mask_summary_particle_v1.json \
+  --overwrite
+
+bash scripts/run_lyra_colmap_fastgs.sh \
+  --source-path /home/rais/FreeFix/data/my4_fullcolmap \
+  --mask-dir /home/rais/FreeFix/data/my4_fullcolmap/masks \
+  --phase train \
+  -r 1 \
+  --iterations 30000 \
+  --overwrite
+```
+  - reads `rgb/*.mp4`
+  - then runs `convert.py -> train.py -> render.py -> metrics.py`
+- prepared COLMAP / FastGS root:
+  - if `--source-path` already contains `images/` and `sparse/0/`
+  - `prepare` becomes a validation step and skips `convert.py`
+
+For example, you can now reuse an already prepared scene root directly:
+
+```bash
+bash scripts/run_lyra_colmap_fastgs.sh \
+  --source-path /home/rais/FreeFix/data/my4_fullcolmap \
+  --phase all \
+  --model-path output/my4_fullcolmap_fastgs \
+  --overwrite
+```
+
+In raw-video mode the wrapper runs:
 
 - `convert.py`
 - `train.py`

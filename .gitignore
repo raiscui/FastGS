@@ -27,3 +27,4 @@ dist/
 
 .envrc.private
 data/
+submodules/

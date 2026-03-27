@@ -457,3 +457,206 @@
   - 关键输出:
     - `执行: ... /workspace/FastGS/scripts/run_flashvsr_reference.py ...`
     - `status=succeeded`
+
+## [2026-03-27 05:48:00 UTC] [Session ID: 119e250a-72a8-40a1-bad2-1a106f4b536a] 错误名称: shell 日志字符串里的反引号触发命令替换
+
+### 问题现象
+- 在给 `scripts/run_lyra_colmap_fastgs.sh` 增加“已准备好的 COLMAP 根目录自动识别”后, 真实执行:
+  - `bash scripts/run_lyra_colmap_fastgs.sh --source-path /home/rais/FreeFix/data/my4_fullcolmap --phase prepare`
+- 结果出现:
+  - `scripts/run_lyra_colmap_fastgs.sh: line 276: --source-path: command not found`
+- 但同一轮输出又显示:
+  - `Prepared dataset root: .../my4_fullcolmap`
+
+### 原因
+- 根因不是目录识别失败.
+- 也不是 `prepare` 分支逻辑错误.
+- 真正原因是我把日志写成了:
+  - `log "检测到 \`--source-path\` 已经是可训练的 ..."`
+- shell 在双引号内仍会处理反引号, 于是把 `` `--source-path` `` 当成命令替换执行.
+
+### 修复
+- 去掉运行态日志和失败提示里的反引号.
+- 保留帮助文档里的反引号, 因为那部分在单引号 heredoc 内, 不会被 shell 执行.
+
+### 验证
+- `bash -n scripts/run_lyra_colmap_fastgs.sh`
+- `bash scripts/run_lyra_colmap_fastgs.sh --source-path /home/rais/FreeFix/data/my4_fullcolmap --phase prepare`
+  - 关键输出:
+    - `检测到 source-path 已经是可训练的 COLMAP / FastGS 根目录, 跳过 convert.py`
+    - 没有再出现 `command not found`
+- 额外回归:
+  - `python3` 扫描脚本里的“带双引号且含反引号”的运行态字符串
+  - 结果为空
+
+## [2026-03-27 14:12:23 CST] [Session ID: a354b352-2b30-435e-b917-cd8fed8e5060] 错误名称: COLMAP 场景的 alpha mask 路径失效, 且缺少独立 mask 目录入口
+
+### 问题现象
+- 用户询问是否能用 mask 压掉空中“棉絮”.
+- 代码静态阅读显示仓库里虽然有 `gt_alpha_mask` 路径, 但 `my4_fullcolmap` 当前没有 alpha 图, 也没有 `masks/` 目录.
+- 最小动态验证进一步显示:
+  - `PILtoTorch(RGBA)` 的输出是 `(4, H, W)`
+  - 当前代码却检查 `shape[1] == 4`
+  - 结果是普通 RGBA 图不会进入 mask 分支
+
+### 原因
+- `utils/camera_utils.py` 把通道维度写错了.
+- `scene/dataset_readers.py` 的 COLMAP 读取路径只认 `images/`, 没有给独立 `mask_dir` 一个正式入口.
+- 两者叠加后, 形成了“看起来像支持 alpha, 实际不真正可用”的假能力.
+
+### 修复
+- 将 alpha 检测条件改为 `shape[0] == 4`.
+- 在 `arguments/__init__.py` 新增 `mask_dir`.
+- 在 `scene/__init__.py` 把 `mask_dir` 透传给 COLMAP 场景读取.
+- 在 `scene/dataset_readers.py` 新增:
+  - `mask_dir` / 自动 `masks/` 解析
+  - 按同名或同 stem 匹配 mask
+  - 将外部 mask 合并进 alpha 通道
+  - 缺失同名 mask 时直接报错, 避免静默脏训练
+- 在 `scripts/run_lyra_colmap_fastgs.sh` 新增 `--mask-dir`.
+
+### 验证
+- 静态验证:
+  - `python3 -m py_compile arguments/__init__.py scene/__init__.py scene/dataset_readers.py utils/camera_utils.py tests/test_mask_loading.py`
+  - `bash -n scripts/run_lyra_colmap_fastgs.sh`
+- 动态验证:
+  - `pixi run python -m unittest tests.test_mask_loading`
+  - 结果: `Ran 3 tests ... OK`
+- 回归覆盖:
+  - RGBA 图能正确提取 alpha
+  - 外部 mask 能合并成 RGBA
+  - 启用 mask 目录但缺失对应文件时会明确失败
+
+## [2026-03-27 14:20:35 CST] [Session ID: a354b352-2b30-435e-b917-cd8fed8e5060] 错误名称: PyTorch 2.6+ 默认 `weights_only=True` 导致 FastGS checkpoint 无法 resume
+
+### 问题现象
+- 我用真实命令做 `10 -> 12` 的最小续训回归:
+  - 先跑:
+    - `bash scripts/run_lyra_colmap_fastgs.sh --source-path /home/rais/FreeFix/data/my4_fullcolmap --phase train --iterations 10 -r 8 --video-iterations 10 --model-path output/my4_resume_verify2 --overwrite`
+  - 再从 `ckpt_10.pth` 续到 `12`
+- 第二段第一次失败, 关键报错:
+  - `_pickle.UnpicklingError: Weights only load failed`
+  - 报错明确指出 PyTorch 2.6 把 `torch.load` 默认值改成了 `weights_only=True`
+
+### 原因
+- FastGS 保存的 checkpoint 不只是纯 tensor 权重.
+- 里面还包含:
+  - optimizer state
+  - shoptimizer state
+  - numpy 标量
+- 继续沿用 `torch.load(checkpoint)` 时, 在 PyTorch 2.6+ 会被新的安全默认值拦住.
+
+### 修复
+- 在 [train.py](/root/autodl-tmp/home/rais/FastGS/train.py) 新增 `load_training_checkpoint(...)`
+- 优先使用:
+  - `torch.load(checkpoint_path, weights_only=False)`
+- 对旧版 PyTorch 保留 `TypeError` 回退, 继续兼容:
+  - `torch.load(checkpoint_path)`
+
+### 验证
+- 静态验证:
+  - `python3 -m py_compile train.py`
+- 动态验证:
+  - 第一段:
+    - `... --iterations 10 --video-iterations 10 ...`
+    - 成功生成 `checkpoints/ckpt_10.pth`
+  - 第二段:
+    - `... --iterations 12 --start-checkpoint .../ckpt_10.pth --video-iterations 12 --position_lr_max_steps 12 --densify_until_iter 12 --overwrite`
+    - 成功继续训练到 `12`
+    - 成功输出:
+      - `[ITER 12] Saving Checkpoint`
+      - `Training complete.`
+
+## [2026-03-27 07:44:00 UTC] [Session ID: 019d2d07-3c10-70b0-a340-22753598e9ff] 错误名称: mask 训练把“忽略区域”误当成“必须拟合成黑色”
+
+### 问题现象
+- `my4_fullcolmap` 启用 `mask_dir` 后, 真实训练多次出现:
+  - `cudaErrorIllegalAddress`
+  - `cudaErrorInvalidAddressSpace`
+- 但 true no-mask 对照在同一组稳态参数下可以稳定跑完 `9000`.
+- 带 mask 修复后, 同样参数也能重新稳定跑完 `9000`.
+
+### 原因
+- 旧实现只做了:
+  - `Camera.original_image *= gt_alpha_mask`
+- 训练主 loss 和 FastGS densify 用到的:
+  - `compute_photometric_loss(...)`
+  - `metric_map`
+  都没有把 render 图像同步套同一份 mask.
+- 这导致被 mask 的亮点像素并没有真正退出优化.
+- 它们只是被拿去和“被涂黑的 GT”比较, 等价于强行要求模型把这些位置拟合成黑色.
+
+### 修复
+- `scene/cameras.py`
+  - 持久化 `gt_alpha_mask`
+- `train.py`
+  - 训练主 loss 改为先对 render 同步套 mask, 再与 GT 比较
+- `utils/fast_utils.py`
+  - `compute_photometric_loss(...)`
+  - `metric_map` 生成
+  都改成对 render 同步应用 mask
+- `utils/loss_utils.py`
+  - 新增 `apply_loss_mask(...)`
+
+### 验证
+- 静态校验:
+  - `pixi run python -m py_compile train.py scene/cameras.py utils/fast_utils.py utils/loss_utils.py tests/test_mask_loss.py`
+- 单元测试:
+  - `pixi run python -m unittest tests.test_mask_loss tests.test_mask_loading`
+  - 结果: `OK`
+- 动态对照:
+  - true no-mask:
+    - `output/my4_nomask_true_9000`
+    - 成功跑完 `9000`
+- 带 mask 修复后:
+    - `output/my4_mask_fixed_9000`
+    - 同样参数成功跑完 `9000`
+
+## [2026-03-27 17:55:35 UTC] [Session ID: 28616] 错误名称: `my5` 目录会误把辅助视频送进 COLMAP, 且 COLMAP 4.x 不认旧 GPU 参数
+
+### 问题现象
+- 真实目录 `/root/autodl-fs/my5` 下, 每个视角目录同时包含:
+  - `generated_videos/generated_video_0.mp4`
+  - `rendering_4D_maps/merged_mask.mp4`
+  - `background_*` / `depth_*` / `3D_gaussian_*`
+- 旧 `convert.py` 在缺少 `rgb/` 时会退到全局递归发现视频.
+- 第一次真实 `prepare` 还进一步暴露:
+  - 本机 COLMAP 4.0.2 报:
+    - `unrecognised option '--SiftExtraction.use_gpu'`
+
+### 原因
+- 第1层:
+  - 视频发现规则缺少 `generated_videos` 这类业务语义更明确的优先级, 递归兜底太宽.
+- 第2层:
+  - 旧前处理没有“mask 视频 -> mask 图”的正式入口.
+- 第3层:
+  - `convert.py` 把 GPU 参数名写死成 COLMAP 3.x 口径:
+    - `--SiftExtraction.use_gpu`
+    - `--SiftMatching.use_gpu`
+  - 但本机 COLMAP 4.x 已改成:
+    - `--FeatureExtraction.use_gpu`
+    - `--FeatureMatching.use_gpu`
+
+### 修复
+- 在 `convert.py` 中:
+  - 新增 `generated_videos` 优先发现
+  - 新增 `merged_mask.mp4` 自动配对与同步抽帧
+  - 新增运行前读取 `colmap <subcommand> -h` 的兼容层, 自动选择 3.x / 4.x 选项名
+- 在 `scripts/run_lyra_colmap_fastgs.sh` 中:
+  - 训练阶段自动优先使用 `<fastgs-root>/masks`
+  - 默认 CUDA COLMAP 路径不存在时, 自动回退到 PATH 里的 `colmap`
+
+### 验证
+- 静态验证:
+  - `python3 -m py_compile convert.py`
+  - `bash -n scripts/run_lyra_colmap_fastgs.sh`
+  - `pixi run python -m unittest tests.test_convert`
+- 真实动态验证:
+  - `prepare` 已确认输出:
+    - `972` 张 `input`
+    - `972` 张 `masks`
+    - `distorted/database.db`
+  - 真实日志已确认:
+    - `feature_extractor` 使用 `--FeatureExtraction.use_gpu`
+    - `exhaustive_matcher` 使用 `--FeatureMatching.use_gpu`
+    - 当前已进入 COLMAP `exhaustive_matcher`

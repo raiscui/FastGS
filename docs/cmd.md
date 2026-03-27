@@ -1,5 +1,13 @@
-  bash /workspace/FastGS/scripts/run_versecrafter_flashvsr_fastgs.sh \
-    --source-path /workspace/VerseCrafter/demo_data/my4 \
+    bash scripts/run_lyra_colmap_fastgs.sh \
+    --source-path /home/rais/FreeFix/data/my4_fullcolmap \
+    --phase all \
+    -r 1 \
+    --model-path output/my4_fullcolmap_fastgs \
+    --overwrite
+
+
+  bash scripts/run_versecrafter_flashvsr_fastgs.sh \
+    --source-path data/my4 \
     --scene-stem generated_video_0 \
     --phase all \
     --mode full \
@@ -13,7 +21,7 @@
     --camera-model SIMPLE_PINHOLE \
     -r 1 \
     --iterations 50000 \
-    --local-python <装好 FlashVSR 依赖的 python> \
+    --local-python /home/rais/FlashVSR-Pro/.pixi/envs/default/bin/python3 \
     --overwrite
 
   如果你后面把第 2 张卡修好了, 只要把这 3 个参数改回:

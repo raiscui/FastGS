@@ -1,7 +1,7 @@
 import torch
 from PIL import ImageFilter
 from gaussian_renderer import render_fastgs
-from .loss_utils import l1_loss
+from .loss_utils import apply_loss_mask, l1_loss
 from fused_ssim import fused_ssim as fast_ssim
 import torchvision.transforms as transforms
 import random
@@ -25,9 +25,10 @@ def get_loss(reconstructed_image, original_image):
     return l1_loss_norm
 
 def compute_photometric_loss(viewpoint_cam, image):
-    gt_image = viewpoint_cam.original_image.cuda()
-    Ll1 = l1_loss(image, gt_image)
-    loss = (1.0 - 0.2) * Ll1 + 0.2 * (1.0 - fast_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)))
+    gt_image = viewpoint_cam.original_image.to(image.device)
+    masked_image = apply_loss_mask(image, viewpoint_cam.gt_alpha_mask)
+    Ll1 = l1_loss(masked_image, gt_image)
+    loss = (1.0 - 0.2) * Ll1 + 0.2 * (1.0 - fast_ssim(masked_image.unsqueeze(0), gt_image.unsqueeze(0)))
     return loss
 
 def normalize(config_value, value_tensor):
@@ -74,10 +75,11 @@ def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY = 
         my_viewpoint_cam = camlist[view]
         render_image = render_fastgs(my_viewpoint_cam, gaussians, pipe, bg, args.mult)["render"]
         photometric_loss = compute_photometric_loss(my_viewpoint_cam, render_image)
+        masked_render_image = apply_loss_mask(render_image, my_viewpoint_cam.gt_alpha_mask)
 
-        gt_image = my_viewpoint_cam.original_image.cuda()
+        gt_image = my_viewpoint_cam.original_image.to(render_image.device)
         get_flag = True
-        l1_loss_norm = get_loss(render_image, gt_image)
+        l1_loss_norm = get_loss(masked_render_image, gt_image)
         
         metric_map = (l1_loss_norm > args.loss_thresh).int()
 

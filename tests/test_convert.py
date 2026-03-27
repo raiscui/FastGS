@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from convert import read_text_image_count, select_best_sparse_model
+from convert import (
+    build_video_extraction_plans,
+    discover_video_files,
+    read_text_image_count,
+    select_best_sparse_model,
+)
 
 
 class ConvertSparseModelSelectionTest(unittest.TestCase):
@@ -71,6 +76,63 @@ class ConvertSparseModelSelectionTest(unittest.TestCase):
         image_path.write_text(image_text + "\n", encoding="utf-8")
 
         self.assertEqual(read_text_image_count(image_path), 2)
+
+    def test_discover_video_files_prefers_generated_videos_over_recursive_auxiliary_videos(self):
+        """`generated_videos` 应先于全局递归兜底, 避免把辅助视频扫进来."""
+
+        generated_dir = self.root / "0" / "generated_videos"
+        rendering_dir = self.root / "0" / "rendering_4D_maps"
+        generated_dir.mkdir(parents=True, exist_ok=True)
+        rendering_dir.mkdir(parents=True, exist_ok=True)
+
+        (generated_dir / "generated_video_0.mp4").write_bytes(b"rgb")
+        (rendering_dir / "background_depth.mp4").write_bytes(b"depth")
+        (rendering_dir / "merged_mask.mp4").write_bytes(b"mask")
+
+        videos, discovery_mode = discover_video_files(self.root)
+
+        self.assertEqual(discovery_mode, "generated_videos_recursive")
+        self.assertEqual(
+            [path.relative_to(self.root).as_posix() for path in videos],
+            ["0/generated_videos/generated_video_0.mp4"],
+        )
+
+    def test_build_video_extraction_plans_attaches_generated_mask_video(self):
+        """VerseCrafter 风格目录应自动把 `merged_mask.mp4` 绑定到同视角 RGB 视频."""
+
+        generated_dir = self.root / "0" / "generated_videos"
+        rendering_dir = self.root / "0" / "rendering_4D_maps"
+        generated_dir.mkdir(parents=True, exist_ok=True)
+        rendering_dir.mkdir(parents=True, exist_ok=True)
+
+        rgb_video = generated_dir / "generated_video_0.mp4"
+        mask_video = rendering_dir / "merged_mask.mp4"
+        rgb_video.write_bytes(b"rgb")
+        mask_video.write_bytes(b"mask")
+
+        plans = build_video_extraction_plans(self.root, [rgb_video])
+
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(plans[0].mask_video_path, mask_video)
+        self.assertEqual(plans[0].frame_prefix, "001_0_generated_videos_generated_video_0")
+
+    def test_build_video_extraction_plans_requires_full_mask_coverage(self):
+        """只给部分视角提供 `merged_mask.mp4` 时, 应立即失败."""
+
+        rgb_video_paths = []
+        for view_id in ("0", "1"):
+            generated_dir = self.root / view_id / "generated_videos"
+            generated_dir.mkdir(parents=True, exist_ok=True)
+            rgb_video = generated_dir / "generated_video_0.mp4"
+            rgb_video.write_bytes(b"rgb")
+            rgb_video_paths.append(rgb_video)
+
+        rendering_dir = self.root / "0" / "rendering_4D_maps"
+        rendering_dir.mkdir(parents=True, exist_ok=True)
+        (rendering_dir / "merged_mask.mp4").write_bytes(b"mask")
+
+        with self.assertRaises(SystemExit):
+            build_video_extraction_plans(self.root, rgb_video_paths)
 
 
 if __name__ == "__main__":

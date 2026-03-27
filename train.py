@@ -14,7 +14,7 @@ import numpy as np
 import os, random, time
 from random import randint
 from lpipsPyTorch import lpips
-from utils.loss_utils import l1_loss
+from utils.loss_utils import apply_loss_mask, l1_loss
 from fused_ssim import fused_ssim as fast_ssim
 from gaussian_renderer import render_fastgs, network_gui_ws
 import sys
@@ -34,14 +34,29 @@ except ImportError:
 from utils.fast_utils import compute_gaussian_score_fastgs, sampling_cameras
 
 
+def load_training_checkpoint(checkpoint_path):
+    """兼容 PyTorch 2.6+ 的 checkpoint 加载行为.
+
+    FastGS 自己保存的 checkpoint 不只是纯 tensor 权重.
+    它还包含优化器状态与若干 numpy 标量, 因此在新版本 PyTorch 上
+    需要显式关闭 `weights_only` 才能恢复续训.
+    """
+
+    try:
+        return torch.load(checkpoint_path, weights_only=False)
+    except TypeError:
+        return torch.load(checkpoint_path)
+
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, websockets):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
+    checkpoint_dir = os.path.join(dataset.model_path, "checkpoints")
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
+        (model_params, first_iter) = load_training_checkpoint(checkpoint)
         gaussians.restore(model_params, opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -97,9 +112,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
         # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
-        ssim_value = fast_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+        gt_image = viewpoint_cam.original_image.to(image.device)
+        # mask 不应该把 GT 单边涂黑后继续计误差.
+        # 这里把 render 同步裁到同一份 alpha 区域, 让被 mask 像素真正退出优化.
+        loss_image = apply_loss_mask(image, viewpoint_cam.gt_alpha_mask)
+        Ll1 = l1_loss(loss_image, gt_image)
+        ssim_value = fast_ssim(loss_image.unsqueeze(0), gt_image.unsqueeze(0))
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
         loss.backward()
 
@@ -120,6 +138,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+
+            if iteration in checkpoint_iterations:
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                checkpoint_path = os.path.join(checkpoint_dir, f"ckpt_{iteration}.pth")
+                torch.save((gaussians.capture(opt.optimizer_type), iteration), checkpoint_path)
             
             optim_start.record()
             
@@ -216,7 +240,8 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 psnr_test, ssim_test, lpips_test = 0.0, 0.0, 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
-                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    image = apply_loss_mask(image, viewpoint.gt_alpha_mask)
+                    gt_image = torch.clamp(viewpoint.original_image.to(image.device), 0.0, 1.0)
                     if tb_writer and (idx < 5):
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
                         if iteration == testing_iterations[0]:
@@ -254,6 +279,7 @@ if __name__ == "__main__":
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[30_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[30_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--websockets", action='store_true', default=False)
@@ -264,7 +290,7 @@ if __name__ == "__main__":
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)
-    safe_state(args.quiet)
+    safe_state(args.quiet, args.seed)
 
     if(args.websockets):
         network_gui_ws.init(args.ip, args.port)

@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from PIL import Image
+from PIL import Image, ImageChops
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
     read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
 from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
@@ -55,6 +55,7 @@ class LyraViewAsset(NamedTuple):
 
 
 LYRA_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm"}
+MASK_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
 LYRA_CACHE_ROOT = ".fastgs_cache/lyra_generated"
 LYRA_POINT_CLOUD_METADATA_NAME = "points3d_metadata.json"
 LYRA_POINT_CLOUD_GENERATOR = "focus_center_v1"
@@ -85,7 +86,80 @@ def getNerfppNorm(cam_info):
 
     return {"translate": translate, "radius": radius}
 
-def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
+def _resolve_mask_root(scene_root, mask_dir):
+    """解析 mask 根目录.
+
+    规则尽量简单:
+    - 显式传了 `mask_dir` 时,相对路径按 `scene_root` 解释.
+    - 未显式传参时,若 `<scene_root>/masks` 存在, 自动启用.
+    - 否则返回 `None`, 表示当前场景不使用 mask.
+    """
+
+    if mask_dir:
+        candidate = Path(mask_dir).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(scene_root) / candidate
+        candidate = candidate.resolve()
+        if not candidate.is_dir():
+            raise FileNotFoundError(f"Mask directory does not exist: {candidate}")
+        return candidate
+
+    auto_candidate = (Path(scene_root) / "masks").resolve()
+    if auto_candidate.is_dir():
+        return auto_candidate
+
+    return None
+
+
+def _find_mask_path(image_path, mask_root):
+    """按 basename 为训练图匹配 mask 文件.
+
+    允许 mask 扩展名与原图不同, 这样用户可以统一输出成 png.
+    一旦启用 mask 目录, 默认要求每张训练图都能找到对应 mask.
+    """
+
+    if mask_root is None:
+        return None
+
+    image_path = Path(image_path)
+    exact_match = mask_root / image_path.name
+    if exact_match.is_file():
+        return exact_match
+
+    for extension in MASK_IMAGE_EXTENSIONS:
+        candidate = mask_root / f"{image_path.stem}{extension}"
+        if candidate.is_file():
+            return candidate
+
+    raise FileNotFoundError(f"Missing mask for image: {image_path.name} in {mask_root}")
+
+
+def _load_training_image_with_optional_mask(image_path, mask_root):
+    """读取训练图, 并在需要时把独立 mask 合并到 alpha 通道."""
+
+    image_path = Path(image_path)
+    with Image.open(image_path) as image_file:
+        rgba_image = image_file.convert("RGBA")
+
+    if mask_root is None:
+        return rgba_image
+
+    mask_path = _find_mask_path(image_path, mask_root)
+    with Image.open(mask_path) as mask_file:
+        mask = mask_file.convert("L")
+
+    if mask.size != rgba_image.size:
+        raise ValueError(
+            f"Mask size mismatch for {image_path.name}: image={rgba_image.size}, mask={mask.size}"
+        )
+
+    # 如果原图已有 alpha, 这里保留“原 alpha 与外部 mask”的交集.
+    combined_alpha = ImageChops.multiply(rgba_image.getchannel("A"), mask)
+    red, green, blue, _ = rgba_image.split()
+    return Image.merge("RGBA", (red, green, blue, combined_alpha))
+
+
+def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, mask_root=None):
     cam_infos = []
     for idx, key in enumerate(cam_extrinsics):
         sys.stdout.write('\r')
@@ -116,7 +190,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
 
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_name = os.path.basename(image_path).split(".")[0]
-        image = Image.open(image_path)
+        image = _load_training_image_with_optional_mask(image_path, mask_root)
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
                               image_path=image_path, image_name=image_name, width=width, height=height)
@@ -516,7 +590,7 @@ def _build_lyra_camera_infos(root: Path, view_assets):
 
     return cam_infos
 
-def readColmapSceneInfo(path, images, eval, llffhold=8):
+def readColmapSceneInfo(path, images, eval, llffhold=8, mask_dir=""):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -529,7 +603,15 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
         cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
     reading_dir = "images" if images == None else images
-    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
+    mask_root = _resolve_mask_root(path, mask_dir)
+    if mask_root is not None:
+        print(f"Using mask directory: {mask_root}")
+    cam_infos_unsorted = readColmapCameras(
+        cam_extrinsics=cam_extrinsics,
+        cam_intrinsics=cam_intrinsics,
+        images_folder=os.path.join(path, reading_dir),
+        mask_root=mask_root,
+    )
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     train_cam_infos, test_cam_infos = _split_train_test_cameras(cam_infos, eval, llffhold=llffhold)

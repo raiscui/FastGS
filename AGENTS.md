@@ -40,3 +40,6 @@ Note: first install/run may compile CUDA extensions from `submodules/`. Ensure `
 ## Commit & Pull Request Guidelines
 - Commit subjects in history are short and action-oriented (e.g., `Update README.md`, `clean`), sometimes with a scope tag like `[FastGS] ...`. Follow that convention.
 - PRs should include: what changed, exact reproduction commands, dataset/scene used, hardware (GPU + CUDA), and before/after speed or quality metrics when relevant.
+
+## Long-term Knowledge
+- `EXPERIENCE.md`: 项目级经验沉淀. 当你要修改 `convert.py`、多视频 / 多机位 wrapper、mask 训练入口, 或排查 Pixi + CUDA 扩展构建问题时, 先读这里, 可以少重复踩很多已经验证过的坑.

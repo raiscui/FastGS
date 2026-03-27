@@ -17,6 +17,14 @@ from math import exp
 C1 = 0.01 ** 2
 C2 = 0.03 ** 2
 
+def apply_loss_mask(network_output, alpha_mask):
+    """把渲染结果按 alpha mask 裁掉, 让被 mask 像素真正退出 loss."""
+
+    if alpha_mask is None:
+        return network_output
+    mask = alpha_mask.to(device=network_output.device, dtype=network_output.dtype)
+    return network_output * mask
+
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
 
@@ -64,4 +72,3 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean()
     else:
         return ssim_map.mean(1).mean(1).mean(1)
-

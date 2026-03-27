@@ -41,9 +41,14 @@ class Camera(nn.Module):
         self.image_height = self.original_image.shape[1]
 
         if gt_alpha_mask is not None:
-            self.original_image *= gt_alpha_mask.to(self.data_device)
+            # 保留原始 alpha mask, 训练时需要让 render 和 GT 走同一份可见区域.
+            self.gt_alpha_mask = gt_alpha_mask.to(self.data_device)
         else:
-            self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
+            self.gt_alpha_mask = torch.ones((1, self.image_height, self.image_width), device=self.data_device)
+
+        # 这里继续把 GT 图像裁到有效区域, 但真正“忽略 mask 像素”的语义
+        # 还要在 loss 侧同步裁掉 render, 否则只是把目标涂黑.
+        self.original_image *= self.gt_alpha_mask
 
         self.zfar = 100.0
         self.znear = 0.01
@@ -68,4 +73,3 @@ class MiniCam:
         self.full_proj_transform = full_proj_transform
         view_inv = torch.inverse(self.world_view_transform)
         self.camera_center = view_inv[3][:3]
-

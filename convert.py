@@ -39,6 +39,13 @@ class SparseModelStats:
     point_count: int
 
 
+@dataclass(frozen=True)
+class VideoExtractionPlan:
+    video_path: Path
+    frame_prefix: str
+    mask_video_path: Optional[Path] = None
+
+
 def parse_args():
     parser = ArgumentParser("Colmap converter")
     parser.add_argument("--no_gpu", action="store_true")
@@ -94,6 +101,26 @@ def run_command(command: Sequence[str], step_name: str) -> None:
     except subprocess.CalledProcessError as exc:
         logging.error("%s failed with code %s. Exiting.", step_name, exc.returncode)
         raise SystemExit(exc.returncode) from exc
+
+
+def command_supports_option(command: str, subcommand: str, option_name: str) -> bool:
+    """探测本机 COLMAP 子命令是否支持某个选项.
+
+    COLMAP 4.x 把部分 GPU 相关参数从 `Sift*` 挪到了 `Feature*`.
+    这里在运行真实命令前先读一遍帮助输出, 避免把某个版本绑死.
+    """
+    try:
+        result = subprocess.run(
+            [command, subcommand, "-h"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+    help_text = f"{result.stdout}\n{result.stderr}"
+    return option_name in help_text
 
 
 def read_binary_count(path: Path) -> int:
@@ -227,6 +254,16 @@ def discover_video_files(video_source: Path) -> Tuple[List[Path], str]:
     if rgb_videos:
         return sorted(rgb_videos), "rgb_recursive"
 
+    # VerseCrafter / 多视角生成视频常见布局:
+    # `<root>/<view_id>/generated_videos/*.mp4`
+    # 这里必须先于全局递归, 否则会把 rendering_4D_maps 里的辅助视频一起扫进去.
+    generated_videos: List[Path] = []
+    for generated_directory in find_named_directories(video_source, "generated_videos"):
+        generated_videos.extend(list_media_files(generated_directory, VIDEO_EXTENSIONS))
+
+    if generated_videos:
+        return sorted(generated_videos), "generated_videos_recursive"
+
     # 最后再做全局递归兜底,兼容其他未来目录布局.
     recursive_videos = sorted(
         path for path in video_source.rglob("*") if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
@@ -261,6 +298,75 @@ def sanitize_stem(file_stem: str) -> str:
     return safe_stem or "video"
 
 
+def find_generated_mask_video(video_path: Path) -> Optional[Path]:
+    """为 `generated_videos/*.mp4` 寻找同视角下的 `merged_mask` 视频.
+
+    这里故意只认 VerseCrafter 风格的稳定落点.
+    这样可以避免把 background/depth 之类辅助视频误当成训练 mask.
+    """
+    if video_path.parent.name.lower() != "generated_videos":
+        return None
+
+    rendering_maps_dir = video_path.parent.parent / "rendering_4D_maps"
+    if not rendering_maps_dir.is_dir():
+        return None
+
+    candidates = sorted(
+        path
+        for path in rendering_maps_dir.iterdir()
+        if path.is_file() and path.stem == "merged_mask" and path.suffix.lower() in VIDEO_EXTENSIONS
+    )
+
+    if not candidates:
+        return None
+
+    if len(candidates) > 1:
+        logging.error(
+            "Expected one merged mask video for `%s`, found %s: %s",
+            video_path,
+            len(candidates),
+            ", ".join(str(path) for path in candidates),
+        )
+        raise SystemExit(1)
+
+    return candidates[0]
+
+
+def build_video_extraction_plans(
+    video_source: Path,
+    videos: Sequence[Path],
+) -> List[VideoExtractionPlan]:
+    plans: List[VideoExtractionPlan] = []
+    paired_mask_count = 0
+
+    for index, video_path in enumerate(videos, start=1):
+        mask_video_path = find_generated_mask_video(video_path)
+        if mask_video_path is not None:
+            paired_mask_count += 1
+
+        plans.append(
+            VideoExtractionPlan(
+                video_path=video_path,
+                frame_prefix=build_frame_prefix(video_source, video_path, index),
+                mask_video_path=mask_video_path,
+            )
+        )
+
+    # 一旦识别到这一类目录正在提供 mask, 就要求整套视角都齐全.
+    # 否则后面训练时会落入“部分视角带 mask, 部分视角不带”的脏状态.
+    if 0 < paired_mask_count < len(plans):
+        missing_mask_videos = [
+            str(plan.video_path) for plan in plans if plan.mask_video_path is None
+        ]
+        logging.error(
+            "Detected generated mask videos for only part of the capture set. Missing mask videos for: %s",
+            ", ".join(missing_mask_videos),
+        )
+        raise SystemExit(1)
+
+    return plans
+
+
 def remove_path(path: Path) -> None:
     if not path.exists():
         return
@@ -275,6 +381,7 @@ def cleanup_generated_outputs(source_path: Path, include_input: bool) -> None:
     generated_paths = [
         source_path / "distorted",
         source_path / "images",
+        source_path / "masks",
         source_path / "sparse",
         source_path / "images_2",
         source_path / "images_4",
@@ -315,6 +422,7 @@ def prepare_input_directory(
     overwrite: bool,
 ) -> Path:
     input_path = source_path / "input"
+    masks_path = source_path / "masks"
 
     # 图片模式沿用旧结构: `<source_path>/input`.
     if video_source is None:
@@ -336,6 +444,8 @@ def prepare_input_directory(
     if not videos:
         logging.error("No supported video files were found in: %s", video_source)
         raise SystemExit(1)
+
+    extraction_plans = build_video_extraction_plans(video_source, videos)
 
     logging.info(
         "Discovered %s video(s) in `%s` using `%s` mode.",
@@ -360,23 +470,67 @@ def prepare_input_directory(
 
     input_path.mkdir(parents=True, exist_ok=True)
 
-    for index, video_path in enumerate(videos, start=1):
-        frame_prefix = build_frame_prefix(video_source, video_path, index)
+    if masks_path.exists():
+        has_existing_masks = any(masks_path.iterdir())
+        if has_existing_masks and not overwrite:
+            logging.error(
+                "`%s` already contains files. Use `--overwrite` to regenerate masks from videos.",
+                masks_path,
+            )
+            raise SystemExit(1)
+
+        if overwrite:
+            remove_path(masks_path)
+
+    should_extract_masks = any(plan.mask_video_path is not None for plan in extraction_plans)
+    if should_extract_masks:
+        masks_path.mkdir(parents=True, exist_ok=True)
+
+    for plan in extraction_plans:
+        frame_prefix = plan.frame_prefix
         frame_pattern = input_path / f"{frame_prefix}_%06d.jpg"
         run_command(
             [
                 ffmpeg_command,
                 "-y",
                 "-i",
-                str(video_path),
+                str(plan.video_path),
                 "-vf",
                 f"fps={video_fps}",
                 "-q:v",
                 "2",
                 str(frame_pattern),
             ],
-            f"frame extraction for {video_path.name}",
+            f"frame extraction for {plan.video_path.name}",
         )
+
+        if plan.mask_video_path is None:
+            continue
+
+        mask_pattern = masks_path / f"{frame_prefix}_%06d.png"
+        run_command(
+            [
+                ffmpeg_command,
+                "-y",
+                "-i",
+                str(plan.mask_video_path),
+                "-vf",
+                f"fps={video_fps},format=gray",
+                str(mask_pattern),
+            ],
+            f"mask extraction for {plan.mask_video_path.name}",
+        )
+
+        rgb_frame_count = len(list(input_path.glob(f"{frame_prefix}_*.jpg")))
+        mask_frame_count = len(list(masks_path.glob(f"{frame_prefix}_*.png")))
+        if rgb_frame_count != mask_frame_count:
+            logging.error(
+                "RGB/mask frame count mismatch for prefix `%s`: rgb=%s mask=%s",
+                frame_prefix,
+                rgb_frame_count,
+                mask_frame_count,
+            )
+            raise SystemExit(1)
 
     extracted_frames = [path for path in input_path.iterdir() if path.is_file()]
     if not extracted_frames:
@@ -384,6 +538,9 @@ def prepare_input_directory(
         raise SystemExit(1)
 
     logging.info("Extracted %s frames into %s", len(extracted_frames), input_path)
+    if should_extract_masks:
+        extracted_masks = [path for path in masks_path.iterdir() if path.is_file()]
+        logging.info("Extracted %s masks into %s", len(extracted_masks), masks_path)
     return input_path
 
 
@@ -443,6 +600,18 @@ def main() -> None:
     use_gpu = 0 if args.no_gpu else 1
     colmap_gpu_index = args.colmap_gpu_index.strip()
 
+    feature_use_gpu_option = "--SiftExtraction.use_gpu"
+    feature_gpu_index_option = "--SiftExtraction.gpu_index"
+    if command_supports_option(colmap_command, "feature_extractor", "--FeatureExtraction.use_gpu"):
+        feature_use_gpu_option = "--FeatureExtraction.use_gpu"
+        feature_gpu_index_option = "--FeatureExtraction.gpu_index"
+
+    matching_use_gpu_option = "--SiftMatching.use_gpu"
+    matching_gpu_index_option = "--SiftMatching.gpu_index"
+    if command_supports_option(colmap_command, "exhaustive_matcher", "--FeatureMatching.use_gpu"):
+        matching_use_gpu_option = "--FeatureMatching.use_gpu"
+        matching_gpu_index_option = "--FeatureMatching.gpu_index"
+
     video_source = detect_video_source(source_path, args.video_path)
     if args.overwrite:
         cleanup_generated_outputs(source_path, include_input=video_source is not None)
@@ -473,11 +642,11 @@ def main() -> None:
                 "1",
                 "--ImageReader.camera_model",
                 args.camera,
-                "--SiftExtraction.use_gpu",
+                feature_use_gpu_option,
                 str(use_gpu),
                 *(
                     [
-                        "--SiftExtraction.gpu_index",
+                        feature_gpu_index_option,
                         colmap_gpu_index,
                     ]
                     if use_gpu and colmap_gpu_index
@@ -493,11 +662,11 @@ def main() -> None:
                 "exhaustive_matcher",
                 "--database_path",
                 str(source_path / "distorted" / "database.db"),
-                "--SiftMatching.use_gpu",
+                matching_use_gpu_option,
                 str(use_gpu),
                 *(
                     [
-                        "--SiftMatching.gpu_index",
+                        matching_gpu_index_option,
                         colmap_gpu_index,
                     ]
                     if use_gpu and colmap_gpu_index

@@ -43,7 +43,9 @@ def loadCam(args, id, cam_info, resolution_scale):
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None
 
-    if resized_image_rgb.shape[1] == 4:
+    # `PILtoTorch` 返回的是 `C,H,W`, 通道轴在第 0 维.
+    # 这里必须看 `shape[0]`, 否则普通尺寸的 RGBA 图永远进不了 alpha mask 分支.
+    if resized_image_rgb.shape[0] == 4:
         loaded_mask = resized_image_rgb[3:4, ...]
 
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
