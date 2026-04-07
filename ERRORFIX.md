@@ -693,3 +693,113 @@
 - 动态状态:
   - 真实 `prepare` 会话 `26742` 仍在 COLMAP `exhaustive_matcher`, 说明修复发生在训练启动前.
   - 无 mask 训练等待器 `96836` 已启动, 会在 `prepare` 完成后自动接棒.
+
+## [2026-03-27 12:16:04 UTC] [Session ID: 80800] 错误名称: `run_lyra_colmap_fastgs.sh --overwrite` 在符号链接工作目录下误判受控路径
+
+### 问题现象
+- 重启 `my5` prepare 时, 脚本报错:
+  - `拒绝删除非受控路径: /root/autodl-tmp/home/rais/FastGS/data/my5_colmap_fastgs`
+- 但该目录本来就在仓库 `data/` 下, 理论上应该允许删除.
+
+### 原因
+- 脚本顶部的:
+  - `SCRIPT_DIR=$(... && pwd)`
+  - `REPO_ROOT=$(... && pwd)`
+  会保留符号链接路径, 得到类似 `/home/rais/FastGS`.
+- 后续 `normalize_path` 又会把路径解析成真实路径:
+  - `/root/autodl-tmp/home/rais/FastGS/...`
+- `safe_remove` 用字符串前缀比对时, 就把真实路径误判成“不在受控目录中”.
+
+### 修复
+- 将脚本顶部的 `pwd` 改成 `pwd -P`, 统一使用真实物理路径口径.
+
+### 验证
+- `bash -n scripts/run_lyra_colmap_fastgs.sh`
+- 修复后重新执行:
+  - `bash scripts/run_lyra_colmap_fastgs.sh --source-path /root/autodl-fs/my5 --fastgs-root data/my5_colmap_fastgs --colmap-bin /root/autodl-tmp/home/rais/.local/opt/colmap-env/bin/colmap --phase prepare --video-fps 5.333333333333 --overwrite`
+- 动态结果:
+  - 成功清理旧目录并重新开始抽帧
+  - `feature_extractor` 已推进到 `Processed file [324/324]`
+  - 已进入新的 `feature matching`
+
+## [2026-03-27 21:59:30] [Session ID: 245310] 错误名称: resume 后 `final_prune_fastgs` 因缺失 `tmp_radii` 崩溃
+
+### 问题现象
+- `my5` 从 `output/my5_nomask_v1/checkpoints/ckpt_20000.pth` 续训时.
+- 训练主体能顺利跑完 `20000 -> 21000`, 也能保存:
+  - `ckpt_21000.pth`
+  - `iteration_21000/point_cloud.ply`
+- 但在保存之后进入 `final_prune_fastgs()` 时稳定报错:
+  - `AttributeError: 'GaussianModel' object has no attribute 'tmp_radii'`
+
+### 原因
+- `tmp_radii` 是 densify / prune 内部使用的瞬时屏幕半径状态.
+- 它没有进入 `capture()` 的 checkpoint payload.
+- 但 `prune_points()` 默认假设对象上一定存在该属性.
+- 首轮训练里这个属性会被早期 densify 路径顺手创建, resume 路径则不会.
+
+### 修复
+- 在 `scene/gaussian_model.py` 的 `__init__` 中把 `self.tmp_radii` 明确初始化为 `None`.
+- 在 `training_setup()` 中再次显式重置为 `None`, 保证每轮训练入口口径一致.
+- 新增 `tests/test_gaussian_model_resume.py`, 锁住“restore 后仍有可为空的 `tmp_radii` 字段”这个契约.
+
+### 验证
+- 静态验证:
+  - `python3 -m py_compile scene/gaussian_model.py tests/test_gaussian_model_resume.py`
+- 单测验证:
+  - `pixi run python -m unittest tests.test_convert tests.test_mask_loading tests.test_gaussian_model_resume`
+- 动态验证:
+  - 从 `ckpt_20000.pth` 重跑 `20000 -> 21000`, 已完整成功退出
+  - 随后 guarded 续训到 `30000`, 全部分段首轮成功
+
+## [2026-03-27 14:37:06 UTC] [Session ID: 277426] 错误名称: `GITHUB_TOKEN` 存在但 `git push` 仍报 `Invalid username or token`
+
+### 问题现象
+- 仓库本地 `main` 比 `origin/main` 超前 `1` 个提交.
+- 环境里也已经有 `GITHUB_TOKEN`.
+- 但首次使用 token 执行 `git push origin HEAD:main` 时, GitHub 返回:
+  - `remote: Invalid username or token. Password authentication is not supported for Git operations.`
+
+### 原因
+- 不是 token 缺权限.
+- 真实动态证据来自 Python 直接构造请求头:
+  - `ValueError: Invalid header value`
+- 进一步确认:
+  - `GITHUB_TOKEN` 尾部混入了隐藏的回车符 `\\r`
+- 去掉 `\\r\\n` 后, GitHub API 返回:
+  - `LOGIN=raiscui`
+  - `PERMISSIONS={..., \"push\": true, ...}`
+
+### 修复
+- 在实际认证前先清洗 token:
+  - `clean_token=\"$(printf '%s' \"$GITHUB_TOKEN\" | tr -d '\\r\\n')\"`
+- 然后使用 clean token 在无代理、禁用 helper 的模式下执行 push.
+
+### 验证
+- GitHub API:
+  - `/user` 返回 `200`
+  - `/repos/raiscui/FastGS` 返回 `200`
+  - 仓库权限包含 `push: true`
+- 实际推送:
+  - `ebe06ac..122ba55  HEAD -> main`
+- 远端校验:
+  - `refs/heads/main = 122ba55e3ebec97f70ab27c098a88e3441c26ac8`
+
+## [2026-03-27 22:39:30] [Session ID: 245310] 错误名称: 读取 `results.json` 时误用绝对路径作为 scene key
+
+### 问题现象
+- `metrics.py` 已成功跑完并生成 `results.json` / `per_view.json`.
+- 但我在二次读取结果时, 先假设 scene key 会等于模型目录绝对路径.
+- 实际访问时触发 `KeyError`.
+
+### 原因
+- `metrics.py` 在当前这次运行里写入的 scene key 不是我手工假设的绝对路径口径.
+- 这是结果读取代码的键名假设错误, 不是评估失败.
+
+### 修复
+- 改为先读取 json 顶层真实 key, 再继续解析 method 与 per-view 指标.
+
+### 验证
+- 重新读取后已成功拿到:
+  - 汇总指标
+  - best/worst per-view 结果

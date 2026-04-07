@@ -13,6 +13,7 @@ import logging
 import shutil
 import struct
 import subprocess
+import tempfile
 from argparse import ArgumentParser
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +76,12 @@ def parse_args():
         help="Frame sampling rate used when extracting images from videos.",
     )
     parser.add_argument(
+        "--video_frame_step",
+        default=0,
+        type=int,
+        help="Extract every Nth decoded frame from videos. When > 0, takes precedence over --video_fps.",
+    )
+    parser.add_argument(
         "--ffmpeg_executable",
         default="",
         type=str,
@@ -84,6 +91,18 @@ def parse_args():
         "--overwrite",
         action="store_true",
         help="Delete generated outputs before re-running conversion. In video mode this also recreates source_path/input.",
+    )
+    parser.add_argument(
+        "--matcher",
+        default="exhaustive",
+        choices=("exhaustive", "sequential"),
+        help="COLMAP matching strategy. Use `sequential` for ordered image sequences such as videos.",
+    )
+    parser.add_argument(
+        "--video_naming",
+        default="grouped",
+        choices=("grouped", "interleaved"),
+        help="How extracted video frames are named. `interleaved` is useful for fair sequential matcher tests on synchronized multi-view videos.",
     )
     return parser.parse_args()
 
@@ -316,6 +335,56 @@ def build_video_extraction_plans(
     return plans
 
 
+def build_ffmpeg_video_filter(video_fps: float, video_frame_step: int) -> str:
+    if video_frame_step > 0:
+        return f"select=not(mod(n\\,{video_frame_step})),setpts=N/FRAME_RATE/TB"
+
+    return f"fps={video_fps}"
+
+
+def build_matcher_subcommand(matcher: str) -> str:
+    return f"{matcher}_matcher"
+
+
+def build_interleaved_frame_name(frame_index: int, view_index: int, frame_prefix: str) -> str:
+    return f"frame_{frame_index:06d}_view_{view_index:03d}_{frame_prefix}.jpg"
+
+
+def reorder_extracted_frames_interleaved(
+    temporary_root: Path,
+    input_path: Path,
+    extraction_plans: Sequence[VideoExtractionPlan],
+) -> int:
+    extracted_frame_sets: List[List[Path]] = []
+    for plan in extraction_plans:
+        view_dir = temporary_root / plan.frame_prefix
+        frame_paths = sorted(path for path in view_dir.iterdir() if path.is_file())
+        if not frame_paths:
+            continue
+        extracted_frame_sets.append(frame_paths)
+
+    if not extracted_frame_sets:
+        return 0
+
+    max_frame_count = max(len(frame_paths) for frame_paths in extracted_frame_sets)
+    written_count = 0
+    for frame_index in range(max_frame_count):
+        for view_index, frame_paths in enumerate(extracted_frame_sets, start=1):
+            if frame_index >= len(frame_paths):
+                continue
+
+            source_path = frame_paths[frame_index]
+            destination_name = build_interleaved_frame_name(
+                frame_index=frame_index + 1,
+                view_index=view_index,
+                frame_prefix=source_path.parent.name,
+            )
+            shutil.move(str(source_path), str(input_path / destination_name))
+            written_count += 1
+
+    return written_count
+
+
 def remove_path(path: Path) -> None:
     if not path.exists():
         return
@@ -368,6 +437,8 @@ def prepare_input_directory(
     video_source: Optional[Path],
     ffmpeg_command: str,
     video_fps: float,
+    video_frame_step: int,
+    video_naming: str,
     overwrite: bool,
 ) -> Path:
     input_path = source_path / "input"
@@ -418,23 +489,44 @@ def prepare_input_directory(
 
     input_path.mkdir(parents=True, exist_ok=True)
 
-    for plan in extraction_plans:
-        frame_prefix = plan.frame_prefix
-        frame_pattern = input_path / f"{frame_prefix}_%06d.jpg"
-        run_command(
-            [
-                ffmpeg_command,
-                "-y",
-                "-i",
-                str(plan.video_path),
-                "-vf",
-                f"fps={video_fps}",
-                "-q:v",
-                "2",
-                str(frame_pattern),
-            ],
-            f"frame extraction for {plan.video_path.name}",
-        )
+    temporary_root_context = tempfile.TemporaryDirectory(dir=input_path) if video_naming == "interleaved" else None
+    temporary_root = Path(temporary_root_context.name) if temporary_root_context else None
+    try:
+        for plan in extraction_plans:
+            frame_prefix = plan.frame_prefix
+            if temporary_root is None:
+                frame_pattern = input_path / f"{frame_prefix}_%06d.jpg"
+            else:
+                per_view_dir = temporary_root / frame_prefix
+                per_view_dir.mkdir(parents=True, exist_ok=True)
+                frame_pattern = per_view_dir / "%06d.jpg"
+
+            video_filter = build_ffmpeg_video_filter(video_fps, video_frame_step)
+            run_command(
+                [
+                    ffmpeg_command,
+                    "-y",
+                    "-i",
+                    str(plan.video_path),
+                    "-vf",
+                    video_filter,
+                    "-q:v",
+                    "2",
+                    str(frame_pattern),
+                ],
+                f"frame extraction for {plan.video_path.name}",
+            )
+
+        if temporary_root is not None:
+            written_count = reorder_extracted_frames_interleaved(
+                temporary_root=temporary_root,
+                input_path=input_path,
+                extraction_plans=extraction_plans,
+            )
+            logging.info("Reordered %s extracted frame(s) into interleaved naming.", written_count)
+    finally:
+        if temporary_root_context is not None:
+            temporary_root_context.cleanup()
 
     extracted_frames = [path for path in input_path.iterdir() if path.is_file()]
     if not extracted_frames:
@@ -488,8 +580,11 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     args = parse_args()
 
-    if args.video_fps <= 0:
+    if args.video_fps <= 0 and args.video_frame_step <= 0:
         logging.error("`--video_fps` must be greater than 0, got %s", args.video_fps)
+        raise SystemExit(1)
+    if args.video_frame_step < 0:
+        logging.error("`--video_frame_step` must be >= 0, got %s", args.video_frame_step)
         raise SystemExit(1)
 
     source_path = Path(args.source_path).expanduser()
@@ -509,7 +604,8 @@ def main() -> None:
 
     matching_use_gpu_option = "--SiftMatching.use_gpu"
     matching_gpu_index_option = "--SiftMatching.gpu_index"
-    if command_supports_option(colmap_command, "exhaustive_matcher", "--FeatureMatching.use_gpu"):
+    matcher_command = build_matcher_subcommand(args.matcher)
+    if command_supports_option(colmap_command, matcher_command, "--FeatureMatching.use_gpu"):
         matching_use_gpu_option = "--FeatureMatching.use_gpu"
         matching_gpu_index_option = "--FeatureMatching.gpu_index"
 
@@ -522,6 +618,8 @@ def main() -> None:
         video_source=video_source,
         ffmpeg_command=ffmpeg_command,
         video_fps=args.video_fps,
+        video_frame_step=args.video_frame_step,
+        video_naming=args.video_naming,
         overwrite=args.overwrite,
     )
 
@@ -560,7 +658,7 @@ def main() -> None:
         run_command(
             [
                 colmap_command,
-                "exhaustive_matcher",
+                matcher_command,
                 "--database_path",
                 str(source_path / "distorted" / "database.db"),
                 matching_use_gpu_option,

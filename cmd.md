@@ -1,6 +1,99 @@
-# `my4` 当前命令与参数说明
+# `nt1` COLMAP `exhaustive` 命令
 
-更新时间: `2026-03-27 09:11:19 UTC`  
+更新时间: `2026-04-08 UTC`
+
+说明:
+- 这条命令对应 `/home/rais/VerseCrafter/demo_data/nt1` 的正式 `COLMAP prepare` 口径。
+- 输入是 `12` 路 `generated_videos/generated_video_0.mp4`。
+- 抽帧方式不是 `fps=`，而是按帧号采样:
+  - `--video-frame-step 3`
+- 输出命名使用交错布局:
+  - `--video-naming interleaved`
+- `COLMAP` matcher 使用:
+  - `exhaustive`
+- 使用的 CUDA 版 `COLMAP` 可执行文件:
+  - `/home/rais/.local/opt/colmap-env/bin/colmap`
+
+命令:
+
+```bash
+bash scripts/run_lyra_colmap_fastgs.sh \
+  --phase prepare \
+  --source-path /home/rais/VerseCrafter/demo_data/nt1 \
+  --fastgs-root data/nt1_step3_interleaved_exhaustive \
+  --colmap-bin /home/rais/.local/opt/colmap-env/bin/colmap \
+  --python-bin /root/autodl-tmp/home/rais/FastGS/.pixi/envs/default/bin/python \
+  --video-frame-step 3 \
+  --video-naming interleaved \
+  --matcher exhaustive \
+  --overwrite
+```
+
+这条命令的预期结果:
+- `data/nt1_step3_interleaved_exhaustive/images = 324`
+- `data/nt1_step3_interleaved_exhaustive/sparse/0` 可直接作为后续 FastGS 输入
+
+结果校验:
+
+```bash
+find data/nt1_step3_interleaved_exhaustive/images -type f | wc -l
+/home/rais/.local/opt/colmap-env/bin/colmap model_analyzer --path data/nt1_step3_interleaved_exhaustive/sparse/0
+```
+
+本次实跑结果:
+- `Registered images = 324`
+- `Points = 37560`
+- `Mean reprojection error = 1.247355 px`
+
+## `nt1` COLMAP `sequential` 对照命令
+
+说明:
+- 这条命令与上面的 `exhaustive` 保持相同抽帧与命名口径:
+  - `--video-frame-step 3`
+  - `--video-naming interleaved`
+- 唯一核心差异是 matcher 改为:
+  - `sequential`
+- 适合做“速度优先”的 COLMAP 对照.
+
+命令:
+
+```bash
+bash scripts/run_lyra_colmap_fastgs.sh \
+  --phase prepare \
+  --source-path /home/rais/VerseCrafter/demo_data/nt1 \
+  --fastgs-root data/nt1_step3_interleaved_sequential \
+  --colmap-bin /home/rais/.local/opt/colmap-env/bin/colmap \
+  --python-bin /root/autodl-tmp/home/rais/FastGS/.pixi/envs/default/bin/python \
+  --video-frame-step 3 \
+  --video-naming interleaved \
+  --matcher sequential \
+  --overwrite
+```
+
+结果校验:
+
+```bash
+find data/nt1_step3_interleaved_sequential/images -type f | wc -l
+/home/rais/.local/opt/colmap-env/bin/colmap model_analyzer --path data/nt1_step3_interleaved_sequential/sparse/0
+```
+
+本次实跑结果:
+- `Registered images = 324`
+- `Points = 17939`
+- `Mean reprojection error = 1.265856 px`
+
+对照结论:
+- `sequential` 同样实现了 `324/324` 全注册
+- 但稀疏点数量明显少于 `exhaustive`
+- 如果更看重 COLMAP 几何质量, 继续优先使用 `exhaustive`
+
+
+# `my4` 当前命令与参数说明
+worst-view 分析
+
+
+
+更新时间: `2026-03-27 09:11:19 UTC`
 会话: `019d2d07-3c10-70b0-a340-22753598e9ff`
 
 说明:

@@ -13,8 +13,8 @@ set -euo pipefail
 # 4. 可选执行 render / metrics
 # ============================================================
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd -P)
 
 SOURCE_PATH="$REPO_ROOT/../lyra/assets/demo/static/diffusion_output_generated_my"
 FASTGS_ROOT=""
@@ -34,8 +34,11 @@ FFMPEG_BIN="ffmpeg"
 
 CAMERA_MODEL="SIMPLE_PINHOLE"
 VIDEO_FPS=24
+VIDEO_FRAME_STEP=0
+VIDEO_NAMING="grouped"
 USE_GPU=1
 COLMAP_GPU_INDEX=""
+MATCHER="exhaustive"
 
 RESOLUTION=1
 ITERATIONS=30000
@@ -98,6 +101,12 @@ usage() {
        --video-fps 24 \
        --camera-model SIMPLE_PINHOLE
 
+  5.1) 按固定帧步长抽帧, 并切到顺序匹配:
+     bash scripts/run_lyra_colmap_fastgs.sh \
+       --video-frame-step 3 \
+       --video-naming interleaved \
+       --matcher sequential
+
   6) 显式指定 CUDA COLMAP 使用哪几张卡:
      bash scripts/run_lyra_colmap_fastgs.sh \
        --phase prepare \
@@ -136,6 +145,11 @@ usage() {
   --ffmpeg-bin <path>           ffmpeg 可执行文件
   --camera-model <name>         COLMAP 相机模型, 默认 SIMPLE_PINHOLE
   --video-fps <x>               抽帧帧率, 默认 24
+  --video-frame-step <n>        每隔 n 帧抽 1 帧. > 0 时优先于 --video-fps
+  --video-naming <grouped|interleaved>
+                                抽帧命名布局. interleaved 会把同一时刻的多视角排在一起
+  --matcher <exhaustive|sequential>
+                                COLMAP matching 策略, 默认 exhaustive
   --colmap-gpu-index <csv>      透传给 COLMAP 的 GPU index, 例如 0 或 0,1
   --no-gpu                      让 convert.py / COLMAP 走 CPU
   -r, --resolution <1|2|4|8|宽度> 训练分辨率, 默认 1
@@ -166,6 +180,8 @@ usage() {
 说明:
   - 这条流程只会使用 `rgb/*.mp4`, 不会读取 Lyra 自带 pose/intrinsics.
   - 默认 `--video-fps 24`, 是为了尽量接近 Lyra 原视频的 121 帧长度.
+  - 如果传了 `--video-frame-step > 0`, 会按解码后的帧序号抽样, 不再按时间轴 `fps=` 采样.
+  - 如果传了 `--video-naming interleaved`, 会把输出文件名重排成“同一时刻的多视角连续出现”, 更适合做 sequential matcher 对照.
   - 对 synthetic / generated 数据, 当前默认 `SIMPLE_PINHOLE` 更稳.
   - 如果 `--source-path` 已经包含 `images/` 和 `sparse/0/`, `prepare` 阶段会退化为数据校验, 不再重复跑 `convert.py`.
   - 如果 `--mask-dir` 为空, 训练阶段只会尝试读取已有且非空的 `<fastgs-root>/masks` 或 `<source-path>/masks`.
@@ -281,8 +297,17 @@ PY
 
 resolve_default_colmap_bin() {
   # 这份脚本历史上偏向当前作者机器上的 CUDA COLMAP 安装前缀.
-  # 但如果那条默认路径不存在, 更稳的策略是自动回退到 PATH 里的 `colmap`.
+  # 但如果那条默认路径不存在, 更稳的策略是:
+  # 1. 先尝试这台机器上已经验证可用的用户级安装前缀.
+  # 2. 再回退到 PATH 里的 `colmap`.
   if [[ "$COLMAP_BIN" == "/workspace/colmap-cuda-install-3.12.6/bin/colmap" && ! -f "$COLMAP_BIN" ]]; then
+    local user_colmap_env="$HOME/.local/opt/colmap-env/bin/colmap"
+    if [[ -f "$user_colmap_env" ]]; then
+      COLMAP_BIN="$user_colmap_env"
+      log "默认 CUDA COLMAP 路径不存在, 自动回退到用户级 colmap-env: $COLMAP_BIN"
+      return 0
+    fi
+
     if command -v colmap >/dev/null 2>&1; then
       COLMAP_BIN="colmap"
       log "默认 CUDA COLMAP 路径不存在, 自动回退到 PATH 中的 colmap"
@@ -398,9 +423,12 @@ prepare_dataset() {
     --source_path "$FASTGS_ROOT"
     --video_path "$SOURCE_PATH"
     --video_fps "$VIDEO_FPS"
+    --video_frame_step "$VIDEO_FRAME_STEP"
+    --video_naming "$VIDEO_NAMING"
     --camera "$CAMERA_MODEL"
     --colmap_executable "$COLMAP_BIN"
     --ffmpeg_executable "$FFMPEG_BIN"
+    --matcher "$MATCHER"
   )
 
   if (( USE_GPU == 0 )); then
@@ -421,6 +449,11 @@ prepare_dataset() {
   log "COLMAP / FastGS data root: $FASTGS_ROOT"
   log "COLMAP camera model: $CAMERA_MODEL"
   log "Video fps: $VIDEO_FPS"
+  if (( VIDEO_FRAME_STEP > 0 )); then
+    log "Video frame step: $VIDEO_FRAME_STEP"
+  fi
+  log "Video naming: $VIDEO_NAMING"
+  log "COLMAP matcher: $MATCHER"
   log "Use GPU in convert.py: $USE_GPU"
   if [[ -n "$COLMAP_GPU_INDEX" ]]; then
     log "COLMAP GPU index: $COLMAP_GPU_INDEX"
@@ -690,6 +723,18 @@ while (( $# > 0 )); do
       VIDEO_FPS="$2"
       shift 2
       ;;
+    --video-frame-step)
+      VIDEO_FRAME_STEP="$2"
+      shift 2
+      ;;
+    --video-naming)
+      VIDEO_NAMING="$2"
+      shift 2
+      ;;
+    --matcher)
+      MATCHER="$2"
+      shift 2
+      ;;
     --colmap-gpu-index)
       COLMAP_GPU_INDEX="$2"
       shift 2
@@ -816,6 +861,8 @@ if value <= 0:
     raise SystemExit(1)
 PY
 
+[[ "$VIDEO_FRAME_STEP" =~ ^[0-9]+$ ]] || fail "--video-frame-step 必须是 >= 0 的整数"
+
 "$PYTHON_BIN" - <<'PY' "$VIDEO_OUTPUT_FPS"
 import sys
 
@@ -837,6 +884,22 @@ case "$CAMERA_MODEL" in
     ;;
   *)
     fail "--camera-model 只支持 SIMPLE_PINHOLE / PINHOLE / OPENCV"
+    ;;
+esac
+
+case "$VIDEO_NAMING" in
+  grouped|interleaved)
+    ;;
+  *)
+    fail "--video-naming 只支持 grouped / interleaved"
+    ;;
+esac
+
+case "$MATCHER" in
+  exhaustive|sequential)
+    ;;
+  *)
+    fail "--matcher 只支持 exhaustive / sequential"
     ;;
 esac
 

@@ -68,6 +68,10 @@ class GaussianModel:
         self.shoptimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+        # `tmp_radii` 只是一轮 densify / prune 内部使用的瞬时屏幕半径.
+        # 它不进入 checkpoint, 但对象上必须始终有这个字段, 否则 resume 后
+        # 走到 final prune 会因为属性缺失而直接崩掉.
+        self.tmp_radii = None
         self.setup_functions()
 
     def capture(self, optimizer_type):
@@ -194,6 +198,9 @@ class GaussianModel:
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.xyz_gradient_accum_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        # 续训时这类瞬时渲染统计不应该从旧状态继承.
+        # 每次开始一轮训练前都显式清空, 保持和首轮训练一致.
+        self.tmp_radii = None
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
