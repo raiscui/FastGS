@@ -36,6 +36,7 @@ CAMERA_MODEL="SIMPLE_PINHOLE"
 VIDEO_FPS=24
 VIDEO_FRAME_STEP=0
 VIDEO_NAMING="grouped"
+FINAL_IMAGE_NAMING="numeric"
 USE_GPU=1
 COLMAP_GPU_INDEX=""
 MATCHER="exhaustive"
@@ -148,6 +149,8 @@ usage() {
   --video-frame-step <n>        每隔 n 帧抽 1 帧. > 0 时优先于 --video-fps
   --video-naming <grouped|interleaved>
                                 抽帧命名布局. interleaved 会把同一时刻的多视角排在一起
+  --final-image-naming <preserve|numeric>
+                                抽帧后在 input/ 中的最终命名. 默认 numeric, 会写成 000001.jpg 这类连续编号
   --matcher <exhaustive|sequential>
                                 COLMAP matching 策略, 默认 exhaustive
   --colmap-gpu-index <csv>      透传给 COLMAP 的 GPU index, 例如 0 或 0,1
@@ -182,6 +185,7 @@ usage() {
   - 默认 `--video-fps 24`, 是为了尽量接近 Lyra 原视频的 121 帧长度.
   - 如果传了 `--video-frame-step > 0`, 会按解码后的帧序号抽样, 不再按时间轴 `fps=` 采样.
   - 如果传了 `--video-naming interleaved`, 会把输出文件名重排成“同一时刻的多视角连续出现”, 更适合做 sequential matcher 对照.
+  - 默认 `--final-image-naming numeric`, 会把 input/ 与后续 COLMAP 输出都稳定成 `000001.jpg` 这类连续 6 位编号.
   - 对 synthetic / generated 数据, 当前默认 `SIMPLE_PINHOLE` 更稳.
   - 如果 `--source-path` 已经包含 `images/` 和 `sparse/0/`, `prepare` 阶段会退化为数据校验, 不再重复跑 `convert.py`.
   - 如果 `--mask-dir` 为空, 训练阶段只会尝试读取已有且非空的 `<fastgs-root>/masks` 或 `<source-path>/masks`.
@@ -425,6 +429,7 @@ prepare_dataset() {
     --video_fps "$VIDEO_FPS"
     --video_frame_step "$VIDEO_FRAME_STEP"
     --video_naming "$VIDEO_NAMING"
+    --final_image_naming "$FINAL_IMAGE_NAMING"
     --camera "$CAMERA_MODEL"
     --colmap_executable "$COLMAP_BIN"
     --ffmpeg_executable "$FFMPEG_BIN"
@@ -453,6 +458,7 @@ prepare_dataset() {
     log "Video frame step: $VIDEO_FRAME_STEP"
   fi
   log "Video naming: $VIDEO_NAMING"
+  log "Final image naming: $FINAL_IMAGE_NAMING"
   log "COLMAP matcher: $MATCHER"
   log "Use GPU in convert.py: $USE_GPU"
   if [[ -n "$COLMAP_GPU_INDEX" ]]; then
@@ -731,6 +737,10 @@ while (( $# > 0 )); do
       VIDEO_NAMING="$2"
       shift 2
       ;;
+    --final-image-naming)
+      FINAL_IMAGE_NAMING="$2"
+      shift 2
+      ;;
     --matcher)
       MATCHER="$2"
       shift 2
@@ -892,6 +902,14 @@ case "$VIDEO_NAMING" in
     ;;
   *)
     fail "--video-naming 只支持 grouped / interleaved"
+    ;;
+esac
+
+case "$FINAL_IMAGE_NAMING" in
+  preserve|numeric)
+    ;;
+  *)
+    fail "--final-image-naming 只支持 preserve / numeric"
     ;;
 esac
 

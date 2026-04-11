@@ -279,6 +279,60 @@ class ConvertVideoExtractionOptionsTest(unittest.TestCase):
             ],
         )
 
+    @mock.patch("convert.run_command")
+    @mock.patch("convert.discover_video_files")
+    def test_prepare_input_directory_can_renumber_interleaved_frames_numerically(
+        self,
+        mock_discover_video_files,
+        mock_run_command,
+    ):
+        second_video_path = self.video_source / "view1.mp4"
+        second_video_path.write_bytes(b"video")
+        mock_discover_video_files.return_value = ([self.video_path, second_video_path], "direct")
+
+        def fake_run_command(command, _step_name):
+            output_pattern = Path(command[-1])
+            output_pattern.parent.mkdir(parents=True, exist_ok=True)
+            for frame_number in (1, 2):
+                output_path = output_pattern.with_name(f"{frame_number:06d}.jpg")
+                output_path.write_bytes(
+                    f"frame-{output_pattern.parent.name}-{frame_number}".encode("utf-8")
+                )
+
+        mock_run_command.side_effect = fake_run_command
+
+        prepare_input_directory(
+            source_path=self.source_path,
+            video_source=self.video_source,
+            ffmpeg_command="ffmpeg",
+            video_fps=5.333333333333,
+            video_frame_step=3,
+            video_naming="interleaved",
+            overwrite=False,
+            final_image_naming="numeric",
+        )
+
+        input_dir = self.source_path / "input"
+        extracted_names = sorted(path.name for path in input_dir.iterdir())
+        self.assertEqual(
+            extracted_names,
+            [
+                "000001.jpg",
+                "000002.jpg",
+                "000003.jpg",
+                "000004.jpg",
+            ],
+        )
+        self.assertEqual(
+            [(input_dir / name).read_text(encoding="utf-8") for name in extracted_names],
+            [
+                "frame-001_view0-1",
+                "frame-002_view1-1",
+                "frame-001_view0-2",
+                "frame-002_view1-2",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

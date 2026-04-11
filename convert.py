@@ -104,6 +104,12 @@ def parse_args():
         choices=("grouped", "interleaved"),
         help="How extracted video frames are named. `interleaved` is useful for fair sequential matcher tests on synchronized multi-view videos.",
     )
+    parser.add_argument(
+        "--final_image_naming",
+        default="preserve",
+        choices=("preserve", "numeric"),
+        help="How extracted frames are finally named inside source_path/input before COLMAP. `numeric` rewrites them to contiguous 6-digit names such as `000001.jpg`.",
+    )
     return parser.parse_args()
 
 
@@ -395,6 +401,24 @@ def remove_path(path: Path) -> None:
         path.unlink()
 
 
+def rename_files_to_contiguous_numeric_sequence(directory: Path) -> int:
+    file_paths = sorted(path for path in directory.iterdir() if path.is_file())
+    if not file_paths:
+        return 0
+
+    staged_paths = []
+    for index, source_path in enumerate(file_paths, start=1):
+        staged_path = directory / f".tmp_numeric_rename_{index:06d}{source_path.suffix.lower()}"
+        source_path.rename(staged_path)
+        staged_paths.append(staged_path)
+
+    for index, staged_path in enumerate(staged_paths, start=1):
+        destination_path = directory / f"{index:06d}{staged_path.suffix.lower()}"
+        staged_path.rename(destination_path)
+
+    return len(staged_paths)
+
+
 def cleanup_generated_outputs(source_path: Path, include_input: bool) -> None:
     generated_paths = [
         source_path / "distorted",
@@ -440,6 +464,7 @@ def prepare_input_directory(
     video_frame_step: int,
     video_naming: str,
     overwrite: bool,
+    final_image_naming: str = "preserve",
 ) -> Path:
     input_path = source_path / "input"
 
@@ -524,6 +549,13 @@ def prepare_input_directory(
                 extraction_plans=extraction_plans,
             )
             logging.info("Reordered %s extracted frame(s) into interleaved naming.", written_count)
+
+        if final_image_naming == "numeric":
+            renamed_count = rename_files_to_contiguous_numeric_sequence(input_path)
+            logging.info(
+                "Renamed %s extracted frame(s) to contiguous numeric filenames.",
+                renamed_count,
+            )
     finally:
         if temporary_root_context is not None:
             temporary_root_context.cleanup()
@@ -621,6 +653,7 @@ def main() -> None:
         video_frame_step=args.video_frame_step,
         video_naming=args.video_naming,
         overwrite=args.overwrite,
+        final_image_naming=args.final_image_naming,
     )
 
     if not args.skip_matching:

@@ -1,3 +1,55 @@
+# new
+
+bash scripts/run_lyra_colmap_fastgs.sh \
+    --python-bin /root/autodl-tmp/home/rais/FastGS/.pixi/envs/default/bin/python \
+    --source-path /autodl-fs/data/verse_video/dm4_sr \
+    --fastgs-root /autodl-fs/data/fastgs/dm4_sr \
+    --phase prepare \
+    --video-frame-step 3 \
+    --video-naming interleaved \
+    --matcher exhaustive \
+    --overwrite
+
+CUDA_VISIBLE_DEVICES=1 bash scripts/run_lyra_colmap_fastgs.sh \
+    --python-bin /root/autodl-tmp/home/rais/FastGS/.pixi/envs/default/bin/python \
+    --source-path /autodl-fs/data/verse_video/dm7_sr \
+    --fastgs-root /autodl-fs/data/fastgs/dm7_sr \
+    --phase prepare \
+    --video-frame-step 3 \
+    --video-naming interleaved \
+    --matcher exhaustive \
+    --overwrite
+CUDA_VISIBLE_DEVICES=1 bash scripts/run_lyra_colmap_fastgs.sh \
+    --python-bin /root/autodl-tmp/home/rais/FastGS/.pixi/envs/default/bin/python \
+    --source-path /autodl-fs/data/verse_video/nt4_sr \
+    --fastgs-root /autodl-fs/data/fastgs/nt4_sr \
+    --phase prepare \
+    --video-frame-step 3 \
+    --video-naming interleaved \
+    --matcher exhaustive \
+    --overwrite
+
+
+
+  CUDA_VISIBLE_DEVICES=0 pixi run python train.py \
+    -s /autodl-fs/data/fastgs/dm7_sr \
+    -m /autodl-fs/data/fastgs/output/dm7_sr_35000 \
+    -i images \
+    --eval \
+    -r 1 \
+    --iterations 35000 \
+    --checkpoint_iterations 35000
+
+
+  CUDA_VISIBLE_DEVICES=0 pixi run python train.py \
+    -s /autodl-fs/data/fastgs/dm4_sr \
+    -m /autodl-fs/data/fastgs/output/dm4_sr_35000 \
+    -i images \
+    --eval \
+    --iterations 35000 \
+    --checkpoint_iterations 35000
+
+
 # `nt1` COLMAP `exhaustive` 命令
 
 更新时间: `2026-04-08 UTC`
