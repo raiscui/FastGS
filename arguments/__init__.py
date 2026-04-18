@@ -99,6 +99,11 @@ class OptimizationParams(ParamGroup):
         self.grad_thresh = 0.0002
         self.dense = 0.001
         self.mult = 0.5      # multiplier for the compact box to control the tile number of each splat
+        self.densify_prune_min_opacity = 0.005
+        self.final_prune_min_opacity = 0.1
+        self.final_prune_from_iter = 15_000
+        self.final_prune_until_iter = 30_000
+        self.final_prune_interval = 3000
 
         self.random_background = False
         self.optimizer_type = "default"

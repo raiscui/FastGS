@@ -161,7 +161,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # The multiview consistent densification of fastgs
                     importance_score, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt, DENSIFY=True)                    
                     gaussians.densify_and_prune_fastgs(max_screen_size = size_threshold, 
-                                                min_opacity = 0.005, 
+                                                min_opacity = opt.densify_prune_min_opacity, 
                                                 extent = scene.cameras_extent, 
                                                 radii=radii,
                                                 args = opt,
@@ -174,12 +174,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # The multiview consistent pruning of fastgs. We do it every 3k iterations after 15k
             # In this stage, the model converge basically. So we can prune more aggressively without degrading rendering quality.
             # You can check the rendering results of 20K iterations in arxiv version (https://arxiv.org/abs/2511.04283), the rendering quality is already very good.
-            if iteration % 3000 == 0 and iteration > 15_000 and iteration < 30_000:
+            if (
+                opt.final_prune_interval > 0
+                and iteration % opt.final_prune_interval == 0
+                and iteration > opt.final_prune_from_iter
+                and iteration < opt.final_prune_until_iter
+            ):
                 my_viewpoint_stack = scene.getTrainCameras().copy()
                 camlist = sampling_cameras(my_viewpoint_stack)
 
                 _, pruning_score = compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, opt)                    
-                gaussians.final_prune_fastgs(min_opacity = 0.1, pruning_score = pruning_score)
+                gaussians.final_prune_fastgs(
+                    min_opacity = opt.final_prune_min_opacity,
+                    pruning_score = pruning_score,
+                )
         
             # Optimization step
             if iteration < opt.iterations:

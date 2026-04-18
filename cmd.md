@@ -2,8 +2,8 @@
 
 bash scripts/run_lyra_colmap_fastgs.sh \
     --python-bin /root/autodl-tmp/home/rais/FastGS/.pixi/envs/default/bin/python \
-    --source-path /autodl-fs/data/verse_video/dm4_sr \
-    --fastgs-root /autodl-fs/data/fastgs/dm4_sr \
+    --source-path /autodl-fs/data/verse_video/dm6_sr \
+    --fastgs-root /autodl-fs/data/fastgs/dm6_sr \
     --phase prepare \
     --video-frame-step 3 \
     --video-naming interleaved \
@@ -12,8 +12,8 @@ bash scripts/run_lyra_colmap_fastgs.sh \
 
 CUDA_VISIBLE_DEVICES=1 bash scripts/run_lyra_colmap_fastgs.sh \
     --python-bin /root/autodl-tmp/home/rais/FastGS/.pixi/envs/default/bin/python \
-    --source-path /autodl-fs/data/verse_video/dm7_sr \
-    --fastgs-root /autodl-fs/data/fastgs/dm7_sr \
+    --source-path /autodl-fs/data/verse_video/nt7_sr \
+    --fastgs-root /autodl-fs/data/fastgs/nt7_sr \
     --phase prepare \
     --video-frame-step 3 \
     --video-naming interleaved \
@@ -29,11 +29,37 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_lyra_colmap_fastgs.sh \
     --matcher exhaustive \
     --overwrite
 
+----------
+  --densify_prune_min_opacity 0.005
+  --final_prune_min_opacity 0.1
+  --final_prune_interval 3000
+  --final_prune_from_iter 15000
+  --final_prune_until_iter 30000
+
+bash scripts/run_guarded_train.sh \
+    --data /autodl-fs/data/fastgs/nt1_sr \
+    --model /autodl-fs/data/fastgs/output/nt1_sr_35000_guarded \
+    --gpu 0 \
+    -- \
+    --densify_prune_min_opacity 0.01 \
+    --final_prune_min_opacity 0.15 \
+    --final_prune_interval 1000 \
+    --final_prune_until_iter 35000
 
 
-  CUDA_VISIBLE_DEVICES=0 pixi run python train.py \
-    -s /autodl-fs/data/fastgs/dm7_sr \
-    -m /autodl-fs/data/fastgs/output/dm7_sr_35000 \
+bash scripts/run_guarded_train.sh \
+    --data /autodl-fs/data/fastgs/dm6_sr \
+    --model /autodl-fs/data/fastgs/output/dm6_sr_35000_guarded \
+    --gpu 1
+
+CUDA_VISIBLE_DEVICES=1 bash scripts/run_guarded_train.sh \
+    --data /autodl-fs/data/fastgs/dm3_sr \
+    --model /autodl-fs/data/fastgs/output/dm3_sr_35000_guarded \
+    --gpu 1
+
+  CUDA_VISIBLE_DEVICES=1 pixi run python train.py \
+    -s /autodl-fs/data/fastgs/dm1_sr \
+    -m /autodl-fs/data/fastgs/output/dm1_sr_35000 \
     -i images \
     --eval \
     -r 1 \
